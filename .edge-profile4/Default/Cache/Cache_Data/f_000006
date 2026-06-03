@@ -1,0 +1,467 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/pages/Dashboard.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=6d6e44b2"; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/Axis/frontend/src/pages/Dashboard.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { ArrowUpRight, RefreshCw } from "/node_modules/.vite/deps/lucide-react.js?v=6d6e44b2";
+import { SparkLine } from "/src/components/Charts.tsx?t=1780215757043";
+import { formatPercent, formatPrice } from "/src/data-format.ts";
+const kpiLabels = [
+  ["今日信号", "todaySignals"],
+  ["启用策略", "enabledStrategies"],
+  ["观察币种", "watchSymbols"],
+  ["观察提醒", "observationAlerts"],
+  ["运行策略", "runningStrategies"]
+];
+export function Dashboard({ dashboard, onOpenSignal, onOpenWatch }) {
+  return /* @__PURE__ */ jsxDEV("section", { className: "page", children: [
+    /* @__PURE__ */ jsxDEV("header", { className: "page-header", children: [
+      /* @__PURE__ */ jsxDEV("div", { children: [
+        /* @__PURE__ */ jsxDEV("h1", { children: "早上好，Trader" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 44,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV("p", { children: "市场永远在变化，机会留给盯得住的人。" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 45,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 43,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("div", { className: "header-meta", children: [
+        /* @__PURE__ */ jsxDEV("span", { children: "更新时间：2026-05-31 13:30:00" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 48,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(RefreshCw, { size: 15, "aria-hidden": "true" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 49,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 47,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 42,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ jsxDEV("div", { className: "kpis", children: kpiLabels.map(
+      ([label, key]) => /* @__PURE__ */ jsxDEV("article", { className: "card kpi-card", children: [
+        /* @__PURE__ */ jsxDEV("span", { children: label }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 56,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("strong", { children: dashboard[key] }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 57,
+          columnNumber: 13
+        }, this)
+      ] }, key, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 55,
+        columnNumber: 9
+      }, this)
+    ) }, void 0, false, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 53,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ jsxDEV("div", { className: "dashboard-workspace", children: [
+      /* @__PURE__ */ jsxDEV("section", { className: "panel table-panel latest-panel", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxDEV("h2", { children: "今日最新信号" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 65,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { className: "muted", children: [
+            dashboard.latestSignals.length,
+            " 条"
+          ] }, void 0, true, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 66,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 64,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(SignalRows, { signals: dashboard.latestSignals, onOpenSignal }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 68,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 63,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("section", { className: "panel trend-panel", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxDEV("h2", { children: "信号趋势" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 73,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { className: "muted", children: "近 7 日" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 74,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 72,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(SparkLine, { values: dashboard.signalTrend.map((item) => item.count) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 76,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV("div", { className: "trend-labels", children: dashboard.signalTrend.map(
+          (item) => /* @__PURE__ */ jsxDEV("span", { children: item.date }, item.date, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 79,
+            columnNumber: 13
+          }, this)
+        ) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 77,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 71,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 62,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ jsxDEV("div", { className: "split-layout", children: [
+      /* @__PURE__ */ jsxDEV("section", { className: "panel", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxDEV("h2", { children: "近期策略" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 88,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { className: "muted", children: "按创建时间" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 89,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 87,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(StrategyRows, { strategies: dashboard.recentStrategies }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 91,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 86,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("section", { className: "panel", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxDEV("h2", { children: "近期观察" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 96,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { className: "muted", children: "观察池" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 97,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 95,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(WatchRows, { items: dashboard.recentWatchlist, onOpenWatch }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 99,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 94,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 85,
+      columnNumber: 7
+    }, this)
+  ] }, void 0, true, {
+    fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+    lineNumber: 41,
+    columnNumber: 5
+  }, this);
+}
+_c = Dashboard;
+function SignalRows({
+  signals,
+  onOpenSignal
+}) {
+  return /* @__PURE__ */ jsxDEV("table", { className: "table", children: [
+    /* @__PURE__ */ jsxDEV("thead", { children: /* @__PURE__ */ jsxDEV("tr", { children: [
+      /* @__PURE__ */ jsxDEV("th", { children: "时间" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 117,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("th", { children: "币种" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 118,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("th", { children: "策略" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 119,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("th", { children: "类型" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 120,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("th", { children: "价格" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 121,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("th", { children: "评分" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 122,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("th", { children: "操作" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 123,
+        columnNumber: 11
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 116,
+      columnNumber: 9
+    }, this) }, void 0, false, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 115,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ jsxDEV("tbody", { children: signals.map(
+      (signal) => /* @__PURE__ */ jsxDEV("tr", { children: [
+        /* @__PURE__ */ jsxDEV("td", { children: formatSignalTime(signal.triggeredAt) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 129,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("td", { children: /* @__PURE__ */ jsxDEV("strong", { children: signal.symbol }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 130,
+          columnNumber: 17
+        }, this) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 130,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("td", { children: signal.strategyName }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 131,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("td", { children: /* @__PURE__ */ jsxDEV("span", { className: "chip", children: signalTypeLabel(signal.signalType) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 132,
+          columnNumber: 17
+        }, this) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 132,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("td", { children: formatPrice(signal.price) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 133,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("td", { children: /* @__PURE__ */ jsxDEV("span", { className: "row-value", children: [
+          signal.score,
+          /* @__PURE__ */ jsxDEV(ArrowUpRight, { size: 14, "aria-hidden": "true" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+            lineNumber: 134,
+            columnNumber: 59
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 134,
+          columnNumber: 17
+        }, this) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 134,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("td", { children: /* @__PURE__ */ jsxDEV("button", { className: "secondary compact", onClick: () => onOpenSignal(signal.id), type: "button", children: "查看" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 136,
+          columnNumber: 15
+        }, this) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 135,
+          columnNumber: 13
+        }, this)
+      ] }, signal.id, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 128,
+        columnNumber: 9
+      }, this)
+    ) }, void 0, false, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 126,
+      columnNumber: 7
+    }, this)
+  ] }, void 0, true, {
+    fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+    lineNumber: 114,
+    columnNumber: 5
+  }, this);
+}
+_c2 = SignalRows;
+function formatSignalTime(value) {
+  const match = value.match(/T(\d{2}:\d{2})/);
+  return match?.[1] ?? value.slice(0, 5);
+}
+function signalTypeLabel(signalType) {
+  const value = signalType.toLowerCase();
+  if (value === "trend" || value.includes("趋势")) return "趋势信号";
+  if (value === "momentum" || value.includes("动量")) return "动量突破";
+  if (value === "watch" || value.includes("观察")) return "观察信号";
+  return signalType;
+}
+function StrategyRows({ strategies }) {
+  return /* @__PURE__ */ jsxDEV("div", { className: "compact-list", children: strategies.map(
+    (strategy) => /* @__PURE__ */ jsxDEV("div", { className: "list-row static", children: [
+      /* @__PURE__ */ jsxDEV("span", { children: [
+        /* @__PURE__ */ jsxDEV("strong", { children: strategy.name }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 166,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("small", { children: [
+          strategy.period,
+          " / ",
+          strategy.source === "ai" ? "AI" : "预设"
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 167,
+          columnNumber: 13
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 165,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("span", { className: strategy.enabled ? "status-on" : "status-off", children: strategy.enabled ? "运行中" : "已暂停" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 169,
+        columnNumber: 11
+      }, this)
+    ] }, strategy.id, true, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 164,
+      columnNumber: 7
+    }, this)
+  ) }, void 0, false, {
+    fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+    lineNumber: 162,
+    columnNumber: 5
+  }, this);
+}
+_c3 = StrategyRows;
+function WatchRows({
+  items,
+  onOpenWatch
+}) {
+  return /* @__PURE__ */ jsxDEV("div", { className: "compact-list", children: items.map(
+    (item) => /* @__PURE__ */ jsxDEV("button", { className: "list-row", onClick: () => onOpenWatch(item.id), type: "button", children: [
+      /* @__PURE__ */ jsxDEV("span", { children: [
+        /* @__PURE__ */ jsxDEV("strong", { children: item.symbol }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 190,
+          columnNumber: 13
+        }, this),
+        /* @__PURE__ */ jsxDEV("small", { children: formatPrice(item.currentPrice) }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+          lineNumber: 191,
+          columnNumber: 13
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 189,
+        columnNumber: 11
+      }, this),
+      /* @__PURE__ */ jsxDEV("span", { className: item.change24h >= 0 ? "positive" : "negative", children: formatPercent(item.change24h) }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+        lineNumber: 193,
+        columnNumber: 11
+      }, this)
+    ] }, item.id, true, {
+      fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+      lineNumber: 188,
+      columnNumber: 7
+    }, this)
+  ) }, void 0, false, {
+    fileName: "D:/Axis/frontend/src/pages/Dashboard.tsx",
+    lineNumber: 186,
+    columnNumber: 5
+  }, this);
+}
+_c4 = WatchRows;
+var _c, _c2, _c3, _c4;
+$RefreshReg$(_c, "Dashboard");
+$RefreshReg$(_c2, "SignalRows");
+$RefreshReg$(_c3, "StrategyRows");
+$RefreshReg$(_c4, "WatchRows");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/Axis/frontend/src/pages/Dashboard.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/Axis/frontend/src/pages/Dashboard.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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QkFBQyxXQUFPdkIsc0JBQVlZLEtBQUtrQyxZQUFZLEtBQXJDO0FBQUE7QUFBQTtBQUFBO0FBQUEsZUFBdUM7QUFBQSxXQUZ6QztBQUFBO0FBQUE7QUFBQTtBQUFBLGFBR0E7QUFBQSxNQUNBLHVCQUFDLFVBQUssV0FBV2xDLEtBQUttQyxhQUFhLElBQUksYUFBYSxZQUFhaEQsd0JBQWNhLEtBQUttQyxTQUFTLEtBQTdGO0FBQUE7QUFBQTtBQUFBO0FBQUEsYUFBK0Y7QUFBQSxTQUwvRG5DLEtBQUtpQixJQUF2QztBQUFBO0FBQUE7QUFBQTtBQUFBLFdBTUE7QUFBQSxFQUNELEtBVEg7QUFBQTtBQUFBO0FBQUE7QUFBQSxTQVVBO0FBRUo7QUFBQ21CLE1BcEJRSjtBQUFTLElBQUEzQixJQUFBYSxLQUFBYSxLQUFBSztBQUFBLGFBQUEvQixJQUFBO0FBQUEsYUFBQWEsS0FBQTtBQUFBLGFBQUFhLEtBQUE7QUFBQSxhQUFBSyxLQUFBIiwibmFtZXMiOlsiQXJyb3dVcFJpZ2h0IiwiUmVmcmVzaEN3IiwiU3BhcmtMaW5lIiwiZm9ybWF0UGVyY2VudCIsImZvcm1hdFByaWNlIiwia3BpTGFiZWxzIiwiRGFzaGJvYXJkIiwiZGFzaGJvYXJkIiwib25PcGVuU2lnbmFsIiwib25PcGVuV2F0Y2giLCJtYXAiLCJsYWJlbCIsImtleSIsImxhdGVzdFNpZ25hbHMiLCJsZW5ndGgiLCJzaWduYWxUcmVuZCIsIml0ZW0iLCJjb3VudCIsImRhdGUiLCJyZWNlbnRTdHJhdGVnaWVzIiwicmVjZW50V2F0Y2hsaXN0IiwiX2MiLCJTaWduYWxSb3dzIiwic2lnbmFscyIsInNpZ25hbCIsImZvcm1hdFNpZ25hbFRpbWUiLCJ0cmlnZ2VyZWRBdCIsInN5bWJvbCIsInN0cmF0ZWd5TmFtZSIsInNpZ25hbFR5cGVMYWJlbCIsInNpZ25hbFR5cGUiLCJwcmljZSIsInNjb3JlIiwiaWQiLCJfYzIiLCJ2YWx1ZSIsIm1hdGNoIiwic2xpY2UiLCJ0b0xvd2VyQ2FzZSIsImluY2x1ZGVzIiwiU3RyYXRlZ3lSb3dzIiwic3RyYXRlZ2llcyIsInN0cmF0ZWd5IiwibmFtZSIsInBlcmlvZCIsInNvdXJjZSIsImVuYWJsZWQiLCJfYzMiLCJXYXRjaFJvd3MiLCJpdGVtcyIsImN1cnJlbnRQcmljZSIsImNoYW5nZTI0aCIsIl9jNCJdLCJpZ25vcmVMaXN0IjpbXSwic291cmNlcyI6WyJEYXNoYm9hcmQudHN4Il0sInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IEFycm93VXBSaWdodCwgUmVmcmVzaEN3IH0gZnJvbSBcImx1Y2lkZS1yZWFjdFwiO1xuaW1wb3J0IHsgU3BhcmtMaW5lIH0gZnJvbSBcIi4uL2NvbXBvbmVudHMvQ2hhcnRzXCI7XG5pbXBvcnQgeyBmb3JtYXRQZXJjZW50LCBmb3JtYXRQcmljZSB9IGZyb20gXCIuLi9kYXRhLWZvcm1hdFwiO1xuaW1wb3J0IHR5cGUgeyBEYXNoYm9hcmRTdW1tYXJ5LCBTaWduYWwsIFN0cmF0ZWd5LCBXYXRjaEl0ZW0gfSBmcm9tIFwiLi4vdHlwZXNcIjtcblxuaW50ZXJmYWNlIERhc2hib2FyZFByb3BzIHtcbiAgZGFzaGJvYXJkOiBEYXNoYm9hcmRTdW1tYXJ5O1xuICBvbk9wZW5TaWduYWw6IChpZDogc3RyaW5nKSA9PiB2b2lkO1xuICBvbk9wZW5XYXRjaDogKGlkOiBzdHJpbmcpID0+IHZvaWQ7XG59XG5cbmNvbnN0IGtwaUxhYmVscyA9IFtcbiAgW1wi5LuK5pel5L+h5Y+3XCIsIFwidG9kYXlTaWduYWxzXCJdLFxuICBbXCLlkK/nlKjnrZbnlaVcIiwgXCJlbmFibGVkU3RyYXRlZ2llc1wiXSxcbiAgW1wi6KeC5a+f5biB56eNXCIsIFwid2F0Y2hTeW1ib2xzXCJdLFxuICBbXCLop4Llr5/mj5DphpJcIiwgXCJvYnNlcnZhdGlvbkFsZXJ0c1wiXSxcbiAgW1wi6L+Q6KGM562W55WlXCIsIFwicnVubmluZ1N0cmF0ZWdpZXNcIl1cbl0gYXMgY29uc3Q7XG5cbmV4cG9ydCBmdW5jdGlvbiBEYXNoYm9hcmQoeyBkYXNoYm9hcmQsIG9uT3BlblNpZ25hbCwgb25PcGVuV2F0Y2ggfTogRGFzaGJvYXJkUHJvcHMpIHtcbiAgcmV0dXJuIChcbiAgICA8c2VjdGlvbiBjbGFzc05hbWU9XCJwYWdlXCI+XG4gICAgICA8aGVhZGVyIGNsYXNzTmFtZT1cInBhZ2UtaGVhZGVyXCI+XG4gICAgICAgIDxkaXY+XG4gICAgICAgICAgPGgxPuaXqeS4iuWlve+8jFRyYWRlcjwvaDE+XG4gICAgICAgICAgPHA+5biC5Zy65rC46L+c5Zyo5Y+Y5YyW77yM5py65Lya55WZ57uZ55uv5b6X5L2P55qE5Lq644CCPC9wPlxuICAgICAgICA8L2Rpdj5cbiAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJoZWFkZXItbWV0YVwiPlxuICAgICAgICAgIDxzcGFuPuabtOaWsOaXtumXtO+8mjIwMjYtMDUtMzEgMTM6MzA6MDA8L3NwYW4+XG4gICAgICAgICAgPFJlZnJlc2hDdyBzaXplPXsxNX0gYXJpYS1oaWRkZW49XCJ0cnVlXCIgLz5cbiAgICAgICAgPC9kaXY+XG4gICAgICA8L2hlYWRlcj5cblxuICAgICAgPGRpdiBjbGFzc05hbWU9XCJrcGlzXCI+XG4gICAgICAgIHtrcGlMYWJlbHMubWFwKChbbGFiZWwsIGtleV0pID0+IChcbiAgICAgICAgICA8YXJ0aWNsZSBjbGFzc05hbWU9XCJjYXJkIGtwaS1jYXJkXCIga2V5PXtrZXl9PlxuICAgICAgICAgICAgPHNwYW4+e2xhYmVsfTwvc3Bhbj5cbiAgICAgICAgICAgIDxzdHJvbmc+e2Rhc2hib2FyZFtrZXldfTwvc3Ryb25nPlxuICAgICAgICAgIDwvYXJ0aWNsZT5cbiAgICAgICAgKSl9XG4gICAgICA8L2Rpdj5cblxuICAgICAgPGRpdiBjbGFzc05hbWU9XCJkYXNoYm9hcmQtd29ya3NwYWNlXCI+XG4gICAgICAgIDxzZWN0aW9uIGNsYXNzTmFtZT1cInBhbmVsIHRhYmxlLXBhbmVsIGxhdGVzdC1wYW5lbFwiPlxuICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwicGFuZWwtdGl0bGVcIj5cbiAgICAgICAgICAgIDxoMj7ku4rml6XmnIDmlrDkv6Hlj7c8L2gyPlxuICAgICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPVwibXV0ZWRcIj57ZGFzaGJvYXJkLmxhdGVzdFNpZ25hbHMubGVuZ3RofSDmnaE8L3NwYW4+XG4gICAgICAgICAgPC9kaXY+XG4gICAgICAgICAgPFNpZ25hbFJvd3Mgc2lnbmFscz17ZGFzaGJvYXJkLmxhdGVzdFNpZ25hbHN9IG9uT3BlblNpZ25hbD17b25PcGVuU2lnbmFsfSAvPlxuICAgICAgICA8L3NlY3Rpb24+XG5cbiAgICAgICAgPHNlY3Rpb24gY2xhc3NOYW1lPVwicGFuZWwgdHJlbmQtcGFuZWxcIj5cbiAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInBhbmVsLXRpdGxlXCI+XG4gICAgICAgICAgICA8aDI+5L+h5Y+36LaL5Yq/PC9oMj5cbiAgICAgICAgICAgIDxzcGFuIGNsYXNzTmFtZT1cIm11dGVkXCI+6L+RIDcg5pelPC9zcGFuPlxuICAgICAgICAgIDwvZGl2PlxuICAgICAgICAgIDxTcGFya0xpbmUgdmFsdWVzPXtkYXNoYm9hcmQuc2lnbmFsVHJlbmQubWFwKChpdGVtKSA9PiBpdGVtLmNvdW50KX0gLz5cbiAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInRyZW5kLWxhYmVsc1wiPlxuICAgICAgICAgICAge2Rhc2hib2FyZC5zaWduYWxUcmVuZC5tYXAoKGl0ZW0pID0+IChcbiAgICAgICAgICAgICAgPHNwYW4ga2V5PXtpdGVtLmRhdGV9PntpdGVtLmRhdGV9PC9zcGFuPlxuICAgICAgICAgICAgKSl9XG4gICAgICAgICAgPC9kaXY+XG4gICAgICAgIDwvc2VjdGlvbj5cbiAgICAgIDwvZGl2PlxuXG4gICAgICA8ZGl2IGNsYXNzTmFtZT1cInNwbGl0LWxheW91dFwiPlxuICAgICAgICA8c2VjdGlvbiBjbGFzc05hbWU9XCJwYW5lbFwiPlxuICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwicGFuZWwtdGl0bGVcIj5cbiAgICAgICAgICAgIDxoMj7ov5HmnJ/nrZbnlaU8L2gyPlxuICAgICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPVwibXV0ZWRcIj7mjInliJvlu7rml7bpl7Q8L3NwYW4+XG4gICAgICAgICAgPC9kaXY+XG4gICAgICAgICAgPFN0cmF0ZWd5Um93cyBzdHJhdGVnaWVzPXtkYXNoYm9hcmQucmVjZW50U3RyYXRlZ2llc30gLz5cbiAgICAgICAgPC9zZWN0aW9uPlxuXG4gICAgICAgIDxzZWN0aW9uIGNsYXNzTmFtZT1cInBhbmVsXCI+XG4gICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJwYW5lbC10aXRsZVwiPlxuICAgICAgICAgICAgPGgyPui/keacn+inguWvnzwvaDI+XG4gICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJtdXRlZFwiPuinguWvn+axoDwvc3Bhbj5cbiAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICA8V2F0Y2hSb3dzIGl0ZW1zPXtkYXNoYm9hcmQucmVjZW50V2F0Y2hsaXN0fSBvbk9wZW5XYXRjaD17b25PcGVuV2F0Y2h9IC8+XG4gICAgICAgIDwvc2VjdGlvbj5cbiAgICAgIDwvZGl2PlxuICAgIDwvc2VjdGlvbj5cbiAgKTtcbn1cblxuZnVuY3Rpb24gU2lnbmFsUm93cyh7XG4gIHNpZ25hbHMsXG4gIG9uT3BlblNpZ25hbFxufToge1xuICBzaWduYWxzOiBTaWduYWxbXTtcbiAgb25PcGVuU2lnbmFsOiAoaWQ6IHN0cmluZykgPT4gdm9pZDtcbn0pIHtcbiAgcmV0dXJuIChcbiAgICA8dGFibGUgY2xhc3NOYW1lPVwidGFibGVcIj5cbiAgICAgIDx0aGVhZD5cbiAgICAgICAgPHRyPlxuICAgICAgICAgIDx0aD7ml7bpl7Q8L3RoPlxuICAgICAgICAgIDx0aD7luIHnp408L3RoPlxuICAgICAgICAgIDx0aD7nrZbnlaU8L3RoPlxuICAgICAgICAgIDx0aD7nsbvlnos8L3RoPlxuICAgICAgICAgIDx0aD7ku7fmoLw8L3RoPlxuICAgICAgICAgIDx0aD7or4TliIY8L3RoPlxuICAgICAgICAgIDx0aD7mk43kvZw8L3RoPlxuICAgICAgICA8L3RyPlxuICAgICAgPC90aGVhZD5cbiAgICAgIDx0Ym9keT5cbiAgICAgICAge3NpZ25hbHMubWFwKChzaWduYWwpID0+IChcbiAgICAgICAgICA8dHIga2V5PXtzaWduYWwuaWR9PlxuICAgICAgICAgICAgPHRkPntmb3JtYXRTaWduYWxUaW1lKHNpZ25hbC50cmlnZ2VyZWRBdCl9PC90ZD5cbiAgICAgICAgICAgIDx0ZD48c3Ryb25nPntzaWduYWwuc3ltYm9sfTwvc3Ryb25nPjwvdGQ+XG4gICAgICAgICAgICA8dGQ+e3NpZ25hbC5zdHJhdGVneU5hbWV9PC90ZD5cbiAgICAgICAgICAgIDx0ZD48c3BhbiBjbGFzc05hbWU9XCJjaGlwXCI+e3NpZ25hbFR5cGVMYWJlbChzaWduYWwuc2lnbmFsVHlwZSl9PC9zcGFuPjwvdGQ+XG4gICAgICAgICAgICA8dGQ+e2Zvcm1hdFByaWNlKHNpZ25hbC5wcmljZSl9PC90ZD5cbiAgICAgICAgICAgIDx0ZD48c3BhbiBjbGFzc05hbWU9XCJyb3ctdmFsdWVcIj57c2lnbmFsLnNjb3JlfTxBcnJvd1VwUmlnaHQgc2l6ZT17MTR9IGFyaWEtaGlkZGVuPVwidHJ1ZVwiIC8+PC9zcGFuPjwvdGQ+XG4gICAgICAgICAgICA8dGQ+XG4gICAgICAgICAgICAgIDxidXR0b24gY2xhc3NOYW1lPVwic2Vjb25kYXJ5IGNvbXBhY3RcIiBvbkNsaWNrPXsoKSA9PiBvbk9wZW5TaWduYWwoc2lnbmFsLmlkKX0gdHlwZT1cImJ1dHRvblwiPlxuICAgICAgICAgICAgICAgIOafpeeci1xuICAgICAgICAgICAgICA8L2J1dHRvbj5cbiAgICAgICAgICAgIDwvdGQ+XG4gICAgICAgICAgPC90cj5cbiAgICAgICAgKSl9XG4gICAgICA8L3Rib2R5PlxuICAgIDwvdGFibGU+XG4gICk7XG59XG5cbmZ1bmN0aW9uIGZvcm1hdFNpZ25hbFRpbWUodmFsdWU6IHN0cmluZyk6IHN0cmluZyB7XG4gIGNvbnN0IG1hdGNoID0gdmFsdWUubWF0Y2goL1QoXFxkezJ9OlxcZHsyfSkvKTtcbiAgcmV0dXJuIG1hdGNoPy5bMV0gPz8gdmFsdWUuc2xpY2UoMCwgNSk7XG59XG5cbmZ1bmN0aW9uIHNpZ25hbFR5cGVMYWJlbChzaWduYWxUeXBlOiBzdHJpbmcpOiBzdHJpbmcge1xuICBjb25zdCB2YWx1ZSA9IHNpZ25hbFR5cGUudG9Mb3dlckNhc2UoKTtcbiAgaWYgKHZhbHVlID09PSBcInRyZW5kXCIgfHwgdmFsdWUuaW5jbHVkZXMoXCLotovlir9cIikpIHJldHVybiBcIui2i+WKv+S/oeWPt1wiO1xuICBpZiAodmFsdWUgPT09IFwibW9tZW50dW1cIiB8fCB2YWx1ZS5pbmNsdWRlcyhcIuWKqOmHj1wiKSkgcmV0dXJuIFwi5Yqo6YeP56qB56C0XCI7XG4gIGlmICh2YWx1ZSA9PT0gXCJ3YXRjaFwiIHx8IHZhbHVlLmluY2x1ZGVzKFwi6KeC5a+fXCIpKSByZXR1cm4gXCLop4Llr5/kv6Hlj7dcIjtcbiAgcmV0dXJuIHNpZ25hbFR5cGU7XG59XG5cbmZ1bmN0aW9uIFN0cmF0ZWd5Um93cyh7IHN0cmF0ZWdpZXMgfTogeyBzdHJhdGVnaWVzOiBTdHJhdGVneVtdIH0pIHtcbiAgcmV0dXJuIChcbiAgICA8ZGl2IGNsYXNzTmFtZT1cImNvbXBhY3QtbGlzdFwiPlxuICAgICAge3N0cmF0ZWdpZXMubWFwKChzdHJhdGVneSkgPT4gKFxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cImxpc3Qtcm93IHN0YXRpY1wiIGtleT17c3RyYXRlZ3kuaWR9PlxuICAgICAgICAgIDxzcGFuPlxuICAgICAgICAgICAgPHN0cm9uZz57c3RyYXRlZ3kubmFtZX08L3N0cm9uZz5cbiAgICAgICAgICAgIDxzbWFsbD57c3RyYXRlZ3kucGVyaW9kfSAvIHtzdHJhdGVneS5zb3VyY2UgPT09IFwiYWlcIiA/IFwiQUlcIiA6IFwi6aKE6K6+XCJ9PC9zbWFsbD5cbiAgICAgICAgICA8L3NwYW4+XG4gICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPXtzdHJhdGVneS5lbmFibGVkID8gXCJzdGF0dXMtb25cIiA6IFwic3RhdHVzLW9mZlwifT5cbiAgICAgICAgICAgIHtzdHJhdGVneS5lbmFibGVkID8gXCLov5DooYzkuK1cIiA6IFwi5bey5pqC5YGcXCJ9XG4gICAgICAgICAgPC9zcGFuPlxuICAgICAgICA8L2Rpdj5cbiAgICAgICkpfVxuICAgIDwvZGl2PlxuICApO1xufVxuXG5mdW5jdGlvbiBXYXRjaFJvd3Moe1xuICBpdGVtcyxcbiAgb25PcGVuV2F0Y2hcbn06IHtcbiAgaXRlbXM6IFdhdGNoSXRlbVtdO1xuICBvbk9wZW5XYXRjaDogKGlkOiBzdHJpbmcpID0+IHZvaWQ7XG59KSB7XG4gIHJldHVybiAoXG4gICAgPGRpdiBjbGFzc05hbWU9XCJjb21wYWN0LWxpc3RcIj5cbiAgICAgIHtpdGVtcy5tYXAoKGl0ZW0pID0+IChcbiAgICAgICAgPGJ1dHRvbiBjbGFzc05hbWU9XCJsaXN0LXJvd1wiIGtleT17aXRlbS5pZH0gb25DbGljaz17KCkgPT4gb25PcGVuV2F0Y2goaXRlbS5pZCl9IHR5cGU9XCJidXR0b25cIj5cbiAgICAgICAgICA8c3Bhbj5cbiAgICAgICAgICAgIDxzdHJvbmc+e2l0ZW0uc3ltYm9sfTwvc3Ryb25nPlxuICAgICAgICAgICAgPHNtYWxsPntmb3JtYXRQcmljZShpdGVtLmN1cnJlbnRQcmljZSl9PC9zbWFsbD5cbiAgICAgICAgICA8L3NwYW4+XG4gICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPXtpdGVtLmNoYW5nZTI0aCA+PSAwID8gXCJwb3NpdGl2ZVwiIDogXCJuZWdhdGl2ZVwifT57Zm9ybWF0UGVyY2VudChpdGVtLmNoYW5nZTI0aCl9PC9zcGFuPlxuICAgICAgICA8L2J1dHRvbj5cbiAgICAgICkpfVxuICAgIDwvZGl2PlxuICApO1xufVxuIl0sImZpbGUiOiJEOi9BeGlzL2Zyb250ZW5kL3NyYy9wYWdlcy9EYXNoYm9hcmQudHN4In0=

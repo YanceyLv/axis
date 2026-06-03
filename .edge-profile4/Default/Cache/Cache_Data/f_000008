@@ -1,0 +1,255 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/pages/SignalDetail.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=6d6e44b2"; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/Axis/frontend/src/pages/SignalDetail.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { Eye, Plus } from "/node_modules/.vite/deps/lucide-react.js?v=6d6e44b2";
+import { KlineChart } from "/src/components/Charts.tsx?t=1780215757043";
+import { StrengthGrade } from "/src/components/StrengthGrade.tsx";
+import { formatPrice } from "/src/data-format.ts";
+export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }) {
+  if (!signal) {
+    return /* @__PURE__ */ jsxDEV("section", { className: "page", children: [
+      /* @__PURE__ */ jsxDEV("button", { className: "secondary compact", onClick: onBack, type: "button", children: "返回" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 37,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("div", { className: "panel empty-state", children: "未找到信号。" }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 38,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+      lineNumber: 36,
+      columnNumber: 7
+    }, this);
+  }
+  return /* @__PURE__ */ jsxDEV("section", { className: "page", children: [
+    /* @__PURE__ */ jsxDEV("header", { className: "page-header", children: [
+      /* @__PURE__ */ jsxDEV("div", { children: [
+        /* @__PURE__ */ jsxDEV("h1", { children: [
+          signal.symbol,
+          " 信号详情"
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 47,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV("p", { children: signal.summary }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 48,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 46,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("div", { className: "toolbar-actions", children: [
+        /* @__PURE__ */ jsxDEV("button", { className: "secondary", onClick: onBack, type: "button", children: "返回" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 51,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(
+          "button",
+          {
+            className: "primary",
+            disabled: isAddingToWatch,
+            onClick: () => void onAddToWatch(signal),
+            type: "button",
+            children: [
+              /* @__PURE__ */ jsxDEV(Plus, { size: 17, "aria-hidden": "true" }, void 0, false, {
+                fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+                lineNumber: 58,
+                columnNumber: 13
+              }, this),
+              isAddingToWatch ? "加入中..." : "加入观察"
+            ]
+          },
+          void 0,
+          true,
+          {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 52,
+            columnNumber: 11
+          },
+          this
+        )
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 50,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+      lineNumber: 45,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ jsxDEV("div", { className: "detail-layout", children: [
+      /* @__PURE__ */ jsxDEV("section", { className: "panel chart-panel", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxDEV("h2", { children: "K线走势" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 67,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { className: "muted", children: [
+            signal.period,
+            " / ",
+            signal.triggeredAt
+          ] }, void 0, true, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 68,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 66,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(KlineChart, { candles: signal.candles }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 70,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 65,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("aside", { className: "panel detail-side", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "stat-block", children: [
+          /* @__PURE__ */ jsxDEV("span", { children: "触发价格" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 75,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("strong", { children: formatPrice(signal.price) }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 76,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 74,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV("div", { className: "stat-block", children: [
+          /* @__PURE__ */ jsxDEV("span", { children: "策略" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 79,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("strong", { children: signal.strategyName }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 80,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 78,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV("div", { className: "stat-block", children: [
+          /* @__PURE__ */ jsxDEV("span", { children: "类型" }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 83,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("strong", { children: signal.signalType }, void 0, false, {
+            fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+            lineNumber: 84,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 82,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(StrengthGrade, { grade: signal.strengthGrade, score: signal.score }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 86,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 73,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+      lineNumber: 64,
+      columnNumber: 7
+    }, this),
+    /* @__PURE__ */ jsxDEV("section", { className: "panel", children: [
+      /* @__PURE__ */ jsxDEV("div", { className: "panel-title", children: [
+        /* @__PURE__ */ jsxDEV("h2", { children: "分析理由" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 92,
+          columnNumber: 11
+        }, this),
+        /* @__PURE__ */ jsxDEV(Eye, { size: 18, "aria-hidden": "true" }, void 0, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 93,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 91,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("ul", { className: "analysis-list", children: signal.analysis.map(
+        (item) => /* @__PURE__ */ jsxDEV("li", { children: item }, item, false, {
+          fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+          lineNumber: 97,
+          columnNumber: 11
+        }, this)
+      ) }, void 0, false, {
+        fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+        lineNumber: 95,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+      lineNumber: 90,
+      columnNumber: 7
+    }, this)
+  ] }, void 0, true, {
+    fileName: "D:/Axis/frontend/src/pages/SignalDetail.tsx",
+    lineNumber: 44,
+    columnNumber: 5
+  }, this);
+}
+_c = SignalDetail;
+var _c;
+$RefreshReg$(_c, "SignalDetail");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/Axis/frontend/src/pages/SignalDetail.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/Axis/frontend/src/pages/SignalDetail.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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S0F0RWVsQjtBQUFZLElBQUFrQjtBQUFBLGFBQUFBLElBQUEiLCJuYW1lcyI6WyJFeWUiLCJQbHVzIiwiS2xpbmVDaGFydCIsIlN0cmVuZ3RoR3JhZGUiLCJmb3JtYXRQcmljZSIsIlNpZ25hbERldGFpbCIsInNpZ25hbCIsImlzQWRkaW5nVG9XYXRjaCIsIm9uQmFjayIsIm9uQWRkVG9XYXRjaCIsInN5bWJvbCIsInN1bW1hcnkiLCJwZXJpb2QiLCJ0cmlnZ2VyZWRBdCIsImNhbmRsZXMiLCJwcmljZSIsInN0cmF0ZWd5TmFtZSIsInNpZ25hbFR5cGUiLCJzdHJlbmd0aEdyYWRlIiwic2NvcmUiLCJhbmFseXNpcyIsIm1hcCIsIml0ZW0iLCJfYyJdLCJpZ25vcmVMaXN0IjpbXSwic291cmNlcyI6WyJTaWduYWxEZXRhaWwudHN4Il0sInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IEV5ZSwgUGx1cyB9IGZyb20gXCJsdWNpZGUtcmVhY3RcIjtcbmltcG9ydCB7IEtsaW5lQ2hhcnQgfSBmcm9tIFwiLi4vY29tcG9uZW50cy9DaGFydHNcIjtcbmltcG9ydCB7IFN0cmVuZ3RoR3JhZGUgfSBmcm9tIFwiLi4vY29tcG9uZW50cy9TdHJlbmd0aEdyYWRlXCI7XG5pbXBvcnQgeyBmb3JtYXRQcmljZSB9IGZyb20gXCIuLi9kYXRhLWZvcm1hdFwiO1xuaW1wb3J0IHR5cGUgeyBTaWduYWwgfSBmcm9tIFwiLi4vdHlwZXNcIjtcblxuaW50ZXJmYWNlIFNpZ25hbERldGFpbFByb3BzIHtcbiAgc2lnbmFsOiBTaWduYWwgfCBudWxsO1xuICBpc0FkZGluZ1RvV2F0Y2g6IGJvb2xlYW47XG4gIG9uQmFjazogKCkgPT4gdm9pZDtcbiAgb25BZGRUb1dhdGNoOiAoc2lnbmFsOiBTaWduYWwpID0+IFByb21pc2U8dm9pZD47XG59XG5cbmV4cG9ydCBmdW5jdGlvbiBTaWduYWxEZXRhaWwoeyBzaWduYWwsIGlzQWRkaW5nVG9XYXRjaCwgb25CYWNrLCBvbkFkZFRvV2F0Y2ggfTogU2lnbmFsRGV0YWlsUHJvcHMpIHtcbiAgaWYgKCFzaWduYWwpIHtcbiAgICByZXR1cm4gKFxuICAgICAgPHNlY3Rpb24gY2xhc3NOYW1lPVwicGFnZVwiPlxuICAgICAgICA8YnV0dG9uIGNsYXNzTmFtZT1cInNlY29uZGFyeSBjb21wYWN0XCIgb25DbGljaz17b25CYWNrfSB0eXBlPVwiYnV0dG9uXCI+6L+U5ZuePC9idXR0b24+XG4gICAgICAgIDxkaXYgY2xhc3NOYW1lPVwicGFuZWwgZW1wdHktc3RhdGVcIj7mnKrmib7liLDkv6Hlj7fjgII8L2Rpdj5cbiAgICAgIDwvc2VjdGlvbj5cbiAgICApO1xuICB9XG5cbiAgcmV0dXJuIChcbiAgICA8c2VjdGlvbiBjbGFzc05hbWU9XCJwYWdlXCI+XG4gICAgICA8aGVhZGVyIGNsYXNzTmFtZT1cInBhZ2UtaGVhZGVyXCI+XG4gICAgICAgIDxkaXY+XG4gICAgICAgICAgPGgxPntzaWduYWwuc3ltYm9sfSDkv6Hlj7for6bmg4U8L2gxPlxuICAgICAgICAgIDxwPntzaWduYWwuc3VtbWFyeX08L3A+XG4gICAgICAgIDwvZGl2PlxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInRvb2xiYXItYWN0aW9uc1wiPlxuICAgICAgICAgIDxidXR0b24gY2xhc3NOYW1lPVwic2Vjb25kYXJ5XCIgb25DbGljaz17b25CYWNrfSB0eXBlPVwiYnV0dG9uXCI+6L+U5ZuePC9idXR0b24+XG4gICAgICAgICAgPGJ1dHRvblxuICAgICAgICAgICAgY2xhc3NOYW1lPVwicHJpbWFyeVwiXG4gICAgICAgICAgICBkaXNhYmxlZD17aXNBZGRpbmdUb1dhdGNofVxuICAgICAgICAgICAgb25DbGljaz17KCkgPT4gdm9pZCBvbkFkZFRvV2F0Y2goc2lnbmFsKX1cbiAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxuICAgICAgICAgID5cbiAgICAgICAgICAgIDxQbHVzIHNpemU9ezE3fSBhcmlhLWhpZGRlbj1cInRydWVcIiAvPlxuICAgICAgICAgICAge2lzQWRkaW5nVG9XYXRjaCA/IFwi5Yqg5YWl5LitLi4uXCIgOiBcIuWKoOWFpeinguWvn1wifVxuICAgICAgICAgIDwvYnV0dG9uPlxuICAgICAgICA8L2Rpdj5cbiAgICAgIDwvaGVhZGVyPlxuXG4gICAgICA8ZGl2IGNsYXNzTmFtZT1cImRldGFpbC1sYXlvdXRcIj5cbiAgICAgICAgPHNlY3Rpb24gY2xhc3NOYW1lPVwicGFuZWwgY2hhcnQtcGFuZWxcIj5cbiAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInBhbmVsLXRpdGxlXCI+XG4gICAgICAgICAgICA8aDI+S+e6v+i1sOWKvzwvaDI+XG4gICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJtdXRlZFwiPntzaWduYWwucGVyaW9kfSAvIHtzaWduYWwudHJpZ2dlcmVkQXR9PC9zcGFuPlxuICAgICAgICAgIDwvZGl2PlxuICAgICAgICAgIDxLbGluZUNoYXJ0IGNhbmRsZXM9e3NpZ25hbC5jYW5kbGVzfSAvPlxuICAgICAgICA8L3NlY3Rpb24+XG5cbiAgICAgICAgPGFzaWRlIGNsYXNzTmFtZT1cInBhbmVsIGRldGFpbC1zaWRlXCI+XG4gICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzdGF0LWJsb2NrXCI+XG4gICAgICAgICAgICA8c3Bhbj7op6blj5Hku7fmoLw8L3NwYW4+XG4gICAgICAgICAgICA8c3Ryb25nPntmb3JtYXRQcmljZShzaWduYWwucHJpY2UpfTwvc3Ryb25nPlxuICAgICAgICAgIDwvZGl2PlxuICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwic3RhdC1ibG9ja1wiPlxuICAgICAgICAgICAgPHNwYW4+562W55WlPC9zcGFuPlxuICAgICAgICAgICAgPHN0cm9uZz57c2lnbmFsLnN0cmF0ZWd5TmFtZX08L3N0cm9uZz5cbiAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInN0YXQtYmxvY2tcIj5cbiAgICAgICAgICAgIDxzcGFuPuexu+Weizwvc3Bhbj5cbiAgICAgICAgICAgIDxzdHJvbmc+e3NpZ25hbC5zaWduYWxUeXBlfTwvc3Ryb25nPlxuICAgICAgICAgIDwvZGl2PlxuICAgICAgICAgIDxTdHJlbmd0aEdyYWRlIGdyYWRlPXtzaWduYWwuc3RyZW5ndGhHcmFkZX0gc2NvcmU9e3NpZ25hbC5zY29yZX0gLz5cbiAgICAgICAgPC9hc2lkZT5cbiAgICAgIDwvZGl2PlxuXG4gICAgICA8c2VjdGlvbiBjbGFzc05hbWU9XCJwYW5lbFwiPlxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInBhbmVsLXRpdGxlXCI+XG4gICAgICAgICAgPGgyPuWIhuaekOeQhueUsTwvaDI+XG4gICAgICAgICAgPEV5ZSBzaXplPXsxOH0gYXJpYS1oaWRkZW49XCJ0cnVlXCIgLz5cbiAgICAgICAgPC9kaXY+XG4gICAgICAgIDx1bCBjbGFzc05hbWU9XCJhbmFseXNpcy1saXN0XCI+XG4gICAgICAgICAge3NpZ25hbC5hbmFseXNpcy5tYXAoKGl0ZW0pID0+IChcbiAgICAgICAgICAgIDxsaSBrZXk9e2l0ZW19PntpdGVtfTwvbGk+XG4gICAgICAgICAgKSl9XG4gICAgICAgIDwvdWw+XG4gICAgICA8L3NlY3Rpb24+XG4gICAgPC9zZWN0aW9uPlxuICApO1xufVxuIl0sImZpbGUiOiJEOi9BeGlzL2Zyb250ZW5kL3NyYy9wYWdlcy9TaWduYWxEZXRhaWwudHN4In0=

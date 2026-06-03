@@ -1,0 +1,341 @@
+0 verbose cli E:\nodejs\node.exe E:\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.9.4
+2 info using node@v22.22.1
+3 silly config load:file:E:\nvm\v22.22.1\node_modules\npm\npmrc
+4 silly config load:file:D:\Axis\frontend\.npmrc
+5 silly config load:file:C:\Users\Administrator\.npmrc
+6 silly config load:file:E:\nodejs\etc\npmrc
+7 verbose title npm install
+8 verbose argv "install" "--cache" ".npm-cache"
+9 verbose logfile logs-max:10 dir:D:\Axis\frontend\.npm-cache\_logs\2026-05-31T06_35_45_088Z-
+10 verbose logfile D:\Axis\frontend\.npm-cache\_logs\2026-05-31T06_35_45_088Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4345298944 maxSize:1086324736 maxEntrySize:543162368
+13 silly idealTree buildDeps
+14 silly fetch manifest @types/react@^19.0.2
+15 silly packumentCache full:https://registry.npmjs.org/@types%2freact cache-miss
+16 http fetch GET https://registry.npmjs.org/@types%2freact attempt 1 failed with ECONNRESET
+17 http fetch GET 200 https://registry.npmjs.org/@types%2freact 10796ms attempt #2 (cache miss)
+18 silly packumentCache full:https://registry.npmjs.org/@types%2freact set size:undefined disposed:false
+19 silly fetch manifest @types/react-dom@^19.0.2
+20 silly packumentCache full:https://registry.npmjs.org/@types%2freact-dom cache-miss
+21 http fetch GET 200 https://registry.npmjs.org/@types%2freact-dom 140ms (cache miss)
+22 silly packumentCache full:https://registry.npmjs.org/@types%2freact-dom set size:undefined disposed:false
+23 silly placeDep ROOT @types/react@19.2.15 OK for:  want: ^19.0.2
+24 silly placeDep ROOT @types/react-dom@19.2.3 OK for:  want: ^19.0.2
+25 silly fetch manifest csstype@^3.2.2
+26 silly packumentCache full:https://registry.npmjs.org/csstype cache-miss
+27 http fetch GET 200 https://registry.npmjs.org/csstype 115ms (cache miss)
+28 silly packumentCache full:https://registry.npmjs.org/csstype set size:undefined disposed:false
+29 silly placeDep ROOT csstype@3.2.3 OK for: @types/react@19.2.15 want: ^3.2.2
+30 silly reify moves {}
+31 silly audit bulk request {
+31 silly audit   '@babel/code-frame': [ '7.29.7' ],
+31 silly audit   '@babel/compat-data': [ '7.29.7' ],
+31 silly audit   '@babel/core': [ '7.29.7' ],
+31 silly audit   '@babel/generator': [ '7.29.7' ],
+31 silly audit   '@babel/helper-compilation-targets': [ '7.29.7' ],
+31 silly audit   '@babel/helper-globals': [ '7.29.7' ],
+31 silly audit   '@babel/helper-module-imports': [ '7.29.7' ],
+31 silly audit   '@babel/helper-module-transforms': [ '7.29.7' ],
+31 silly audit   '@babel/helper-plugin-utils': [ '7.29.7' ],
+31 silly audit   '@babel/helper-string-parser': [ '7.29.7' ],
+31 silly audit   '@babel/helper-validator-identifier': [ '7.29.7' ],
+31 silly audit   '@babel/helper-validator-option': [ '7.29.7' ],
+31 silly audit   '@babel/helpers': [ '7.29.7' ],
+31 silly audit   '@babel/parser': [ '7.29.7' ],
+31 silly audit   '@babel/plugin-transform-react-jsx-self': [ '7.29.7' ],
+31 silly audit   '@babel/plugin-transform-react-jsx-source': [ '7.29.7' ],
+31 silly audit   '@babel/template': [ '7.29.7' ],
+31 silly audit   '@babel/traverse': [ '7.29.7' ],
+31 silly audit   '@babel/types': [ '7.29.7' ],
+31 silly audit   '@esbuild/aix-ppc64': [ '0.25.12' ],
+31 silly audit   '@esbuild/android-arm': [ '0.25.12' ],
+31 silly audit   '@esbuild/android-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/android-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/darwin-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/darwin-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/freebsd-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/freebsd-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-arm': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-ia32': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-loong64': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-mips64el': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-ppc64': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-riscv64': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-s390x': [ '0.25.12' ],
+31 silly audit   '@esbuild/linux-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/netbsd-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/netbsd-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/openbsd-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/openbsd-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/openharmony-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/sunos-x64': [ '0.25.12' ],
+31 silly audit   '@esbuild/win32-arm64': [ '0.25.12' ],
+31 silly audit   '@esbuild/win32-ia32': [ '0.25.12' ],
+31 silly audit   '@esbuild/win32-x64': [ '0.25.12' ],
+31 silly audit   '@jridgewell/gen-mapping': [ '0.3.13' ],
+31 silly audit   '@jridgewell/remapping': [ '2.3.5' ],
+31 silly audit   '@jridgewell/resolve-uri': [ '3.1.2' ],
+31 silly audit   '@jridgewell/sourcemap-codec': [ '1.5.5' ],
+31 silly audit   '@jridgewell/trace-mapping': [ '0.3.31' ],
+31 silly audit   '@rolldown/pluginutils': [ '1.0.0-beta.27' ],
+31 silly audit   '@rollup/rollup-android-arm-eabi': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-android-arm64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-darwin-arm64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-darwin-x64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-freebsd-arm64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-freebsd-x64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-arm-gnueabihf': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-arm-musleabihf': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-arm64-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-arm64-musl': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-loong64-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-loong64-musl': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-ppc64-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-ppc64-musl': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-riscv64-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-riscv64-musl': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-s390x-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-x64-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-linux-x64-musl': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-openbsd-x64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-openharmony-arm64': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-win32-arm64-msvc': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-win32-ia32-msvc': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-win32-x64-gnu': [ '4.60.4' ],
+31 silly audit   '@rollup/rollup-win32-x64-msvc': [ '4.60.4' ],
+31 silly audit   '@types/babel__core': [ '7.20.5' ],
+31 silly audit   '@types/babel__generator': [ '7.27.0' ],
+31 silly audit   '@types/babel__template': [ '7.4.4' ],
+31 silly audit   '@types/babel__traverse': [ '7.28.0' ],
+31 silly audit   '@types/estree': [ '1.0.8' ],
+31 silly audit   '@vitejs/plugin-react': [ '4.7.0' ],
+31 silly audit   'baseline-browser-mapping': [ '2.10.33' ],
+31 silly audit   browserslist: [ '4.28.2' ],
+31 silly audit   'caniuse-lite': [ '1.0.30001793' ],
+31 silly audit   'convert-source-map': [ '2.0.0' ],
+31 silly audit   debug: [ '4.4.3' ],
+31 silly audit   'electron-to-chromium': [ '1.5.364' ],
+31 silly audit   esbuild: [ '0.25.12' ],
+31 silly audit   escalade: [ '3.2.0' ],
+31 silly audit   fdir: [ '6.5.0' ],
+31 silly audit   fsevents: [ '2.3.3' ],
+31 silly audit   gensync: [ '1.0.0-beta.2' ],
+31 silly audit   'js-tokens': [ '4.0.0' ],
+31 silly audit   jsesc: [ '3.1.0' ],
+31 silly audit   json5: [ '2.2.3' ],
+31 silly audit   'lru-cache': [ '5.1.1' ],
+31 silly audit   'lucide-react': [ '0.468.0' ],
+31 silly audit   ms: [ '2.1.3' ],
+31 silly audit   nanoid: [ '3.3.12' ],
+31 silly audit   'node-releases': [ '2.0.46' ],
+31 silly audit   picocolors: [ '1.1.1' ],
+31 silly audit   picomatch: [ '4.0.4' ],
+31 silly audit   postcss: [ '8.5.15' ],
+31 silly audit   react: [ '19.2.6' ],
+31 silly audit   'react-dom': [ '19.2.6' ],
+31 silly audit   'react-refresh': [ '0.17.0' ],
+31 silly audit   rollup: [ '4.60.4' ],
+31 silly audit   scheduler: [ '0.27.0' ],
+31 silly audit   semver: [ '6.3.1' ],
+31 silly audit   'source-map-js': [ '1.2.1' ],
+31 silly audit   tinyglobby: [ '0.2.17' ],
+31 silly audit   typescript: [ '5.9.3' ],
+31 silly audit   'update-browserslist-db': [ '1.2.3' ],
+31 silly audit   vite: [ '6.4.2' ],
+31 silly audit   yallist: [ '3.1.1' ],
+31 silly audit   '@types/react': [ '19.2.15' ],
+31 silly audit   '@types/react-dom': [ '19.2.3' ],
+31 silly audit   csstype: [ '3.2.3' ]
+31 silly audit }
+32 verbose reify failed optional dependency D:\Axis\frontend\node_modules\fsevents
+33 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\fsevents' ]
+34 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-win32-ia32-msvc
+35 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-win32-ia32-msvc' ]
+36 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-win32-arm64-msvc
+37 silly reify mark deleted [
+37 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-win32-arm64-msvc'
+37 silly reify ]
+38 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-openharmony-arm64
+39 silly reify mark deleted [
+39 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-openharmony-arm64'
+39 silly reify ]
+40 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-openbsd-x64
+41 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-openbsd-x64' ]
+42 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-x64-musl
+43 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-x64-musl' ]
+44 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-x64-gnu
+45 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-x64-gnu' ]
+46 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-s390x-gnu
+47 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-s390x-gnu' ]
+48 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-riscv64-musl
+49 silly reify mark deleted [
+49 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-riscv64-musl'
+49 silly reify ]
+50 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-riscv64-gnu
+51 silly reify mark deleted [
+51 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-riscv64-gnu'
+51 silly reify ]
+52 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-ppc64-musl
+53 silly reify mark deleted [
+53 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-ppc64-musl'
+53 silly reify ]
+54 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-ppc64-gnu
+55 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-ppc64-gnu' ]
+56 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-loong64-musl
+57 silly reify mark deleted [
+57 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-loong64-musl'
+57 silly reify ]
+58 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-loong64-gnu
+59 silly reify mark deleted [
+59 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-loong64-gnu'
+59 silly reify ]
+60 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-arm64-musl
+61 silly reify mark deleted [
+61 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-arm64-musl'
+61 silly reify ]
+62 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-arm64-gnu
+63 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-arm64-gnu' ]
+64 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-arm-musleabihf
+65 silly reify mark deleted [
+65 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-arm-musleabihf'
+65 silly reify ]
+66 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-linux-arm-gnueabihf
+67 silly reify mark deleted [
+67 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-linux-arm-gnueabihf'
+67 silly reify ]
+68 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-freebsd-x64
+69 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-freebsd-x64' ]
+70 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-freebsd-arm64
+71 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-freebsd-arm64' ]
+72 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-darwin-x64
+73 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-darwin-x64' ]
+74 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-darwin-arm64
+75 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-darwin-arm64' ]
+76 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-android-arm64
+77 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-android-arm64' ]
+78 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@rollup\rollup-android-arm-eabi
+79 silly reify mark deleted [
+79 silly reify   'D:\\Axis\\frontend\\node_modules\\@rollup\\rollup-android-arm-eabi'
+79 silly reify ]
+80 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\win32-ia32
+81 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\win32-ia32' ]
+82 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\win32-arm64
+83 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\win32-arm64' ]
+84 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\sunos-x64
+85 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\sunos-x64' ]
+86 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\openharmony-arm64
+87 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\openharmony-arm64' ]
+88 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\openbsd-x64
+89 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\openbsd-x64' ]
+90 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\openbsd-arm64
+91 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\openbsd-arm64' ]
+92 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\netbsd-x64
+93 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\netbsd-x64' ]
+94 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\netbsd-arm64
+95 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\netbsd-arm64' ]
+96 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-x64
+97 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-x64' ]
+98 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-s390x
+99 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-s390x' ]
+100 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-riscv64
+101 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-riscv64' ]
+102 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-ppc64
+103 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-ppc64' ]
+104 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-mips64el
+105 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-mips64el' ]
+106 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-loong64
+107 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-loong64' ]
+108 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-ia32
+109 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-ia32' ]
+110 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-arm64
+111 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-arm64' ]
+112 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\linux-arm
+113 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\linux-arm' ]
+114 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\freebsd-x64
+115 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\freebsd-x64' ]
+116 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\freebsd-arm64
+117 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\freebsd-arm64' ]
+118 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\darwin-x64
+119 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\darwin-x64' ]
+120 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\darwin-arm64
+121 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\darwin-arm64' ]
+122 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\android-x64
+123 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\android-x64' ]
+124 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\android-arm64
+125 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\android-arm64' ]
+126 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\android-arm
+127 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\android-arm' ]
+128 verbose reify failed optional dependency D:\Axis\frontend\node_modules\@esbuild\aix-ppc64
+129 silly reify mark deleted [ 'D:\\Axis\\frontend\\node_modules\\@esbuild\\aix-ppc64' ]
+130 http cache csstype@https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz 0ms (cache hit)
+131 http cache @types/react-dom@https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz 0ms (cache hit)
+132 http cache @types/react@https://registry.npmjs.org/@types/react/-/react-19.2.15.tgz 0ms (cache hit)
+133 silly tarball no local data for csstype@https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz. Extracting by manifest.
+134 silly tarball no local data for @types/react-dom@https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz. Extracting by manifest.
+135 silly tarball no local data for @types/react@https://registry.npmjs.org/@types/react/-/react-19.2.15.tgz. Extracting by manifest.
+136 http fetch POST 200 https://registry.npmjs.org/-/npm/v1/security/advisories/bulk 215ms
+137 silly audit report {}
+138 http fetch GET 200 https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz 458ms (cache miss)
+139 http fetch GET 200 https://registry.npmjs.org/@types/react/-/react-19.2.15.tgz 467ms (cache miss)
+140 http fetch GET 200 https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz 478ms (cache miss)
+141 silly ADD node_modules/csstype
+142 silly ADD node_modules/@types/react-dom
+143 silly ADD node_modules/@types/react
+144 silly ADD
+145 silly ADD
+146 silly ADD
+147 silly ADD
+148 silly ADD
+149 silly ADD
+150 silly ADD
+151 silly ADD
+152 silly ADD
+153 silly ADD
+154 silly ADD
+155 silly ADD
+156 silly ADD
+157 silly ADD
+158 silly ADD
+159 silly ADD
+160 silly ADD
+161 silly ADD
+162 silly ADD
+163 silly ADD
+164 silly ADD
+165 silly ADD
+166 silly ADD
+167 silly ADD
+168 silly ADD
+169 silly ADD
+170 silly ADD
+171 silly ADD
+172 silly ADD
+173 silly ADD
+174 silly ADD
+175 silly ADD
+176 silly ADD
+177 silly ADD
+178 silly ADD
+179 silly ADD
+180 silly ADD
+181 silly ADD
+182 silly ADD
+183 silly ADD
+184 silly ADD
+185 silly ADD
+186 silly ADD
+187 silly ADD
+188 silly ADD
+189 silly ADD
+190 silly ADD
+191 silly ADD
+192 silly ADD
+193 verbose cwd D:\Axis\frontend
+194 verbose os Windows_NT 10.0.19045
+195 verbose node v22.22.1
+196 verbose npm  v10.9.4
+197 verbose exit 0
+198 info ok
