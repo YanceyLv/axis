@@ -14,3 +14,5 @@ frontend/node_modules/
 frontend/dist/
 .pytest_cache/
 .uv-cache/
+frontend/.env
+frontend/.env.*
