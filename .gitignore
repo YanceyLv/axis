@@ -1,0 +1,16 @@
+.chrome-profile-test/
+.edge-profile*/
+.idea/
+.superpowers/
+backups/
+release/
+backend/.env
+backend/.venv/
+backend/data/
+backend/*.log
+backend/.pytest_cache/
+backend/.uv-cache/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+.uv-cache/
