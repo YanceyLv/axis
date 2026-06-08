@@ -182,6 +182,100 @@ def test_settings_can_save_llm_api_and_pushover_without_returning_secrets():
     assert "pushover-token" not in str(body)
 
 
+def test_new_coin_listing_scan_persists_and_deduplicates(monkeypatch):
+    headers = auth_headers("new-coins@example.com")
+
+    monkeypatch.setattr(
+        store_module,
+        "fetch_binance_new_listing_announcements",
+        lambda: [
+            {
+                "id": "binance-listing-abc",
+                "symbol": "ABC",
+                "tradingPairs": ["ABCUSDT"],
+                "title": "Binance Will List Alpha Beta Coin (ABC)",
+                "url": "https://www.binance.com/en/support/announcement/binance-listing-abc",
+                "announcedAt": "2026-06-05T10:00:00+00:00",
+                "listedAt": None,
+                "status": "upcoming",
+                "source": "binance",
+            }
+        ],
+    )
+
+    first_scan = client.post("/api/new-coins/scan", headers=headers)
+    second_scan = client.post("/api/new-coins/scan", headers=headers)
+    list_response = client.get("/api/new-coins", headers=headers)
+
+    assert first_scan.status_code == 200
+    assert first_scan.json()["fetched"] == 1
+    assert first_scan.json()["created"] == 1
+    assert second_scan.status_code == 200
+    assert second_scan.json()["created"] == 0
+    assert list_response.status_code == 200
+    listings = list_response.json()
+    assert len(listings) == 1
+    assert listings[0]["symbol"] == "ABC"
+    assert listings[0]["tradingPairs"] == ["ABCUSDT"]
+    assert listings[0]["notifiedAt"] is None
+
+
+def test_new_coin_listing_scan_sends_pushover_for_new_items(monkeypatch):
+    headers = auth_headers("new-coin-push@example.com")
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request, timeout=8):
+        calls.append((request, timeout))
+        return FakeResponse()
+
+    client.put(
+        "/api/settings",
+        json={
+            "llm": {"provider": "openai", "baseUrl": "", "model": "", "apiKey": ""},
+            "pushover": {"enabled": True, "userKey": "pushover-user", "appToken": "pushover-token"},
+        },
+        headers=headers,
+    )
+    monkeypatch.setattr(store_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        store_module,
+        "fetch_binance_new_listing_announcements",
+        lambda: [
+            {
+                "id": "binance-listing-xyz",
+                "symbol": "XYZ",
+                "tradingPairs": ["XYZUSDT"],
+                "title": "Binance Will List Xylophone Yield Zone (XYZ)",
+                "url": "https://www.binance.com/en/support/announcement/binance-listing-xyz",
+                "announcedAt": "2026-06-05T11:00:00+00:00",
+                "listedAt": None,
+                "status": "upcoming",
+                "source": "binance",
+            }
+        ],
+    )
+
+    first_scan = client.post("/api/new-coins/scan", headers=headers)
+    second_scan = client.post("/api/new-coins/scan", headers=headers)
+
+    assert first_scan.status_code == 200
+    assert first_scan.json()["created"] == 1
+    assert second_scan.status_code == 200
+    assert second_scan.json()["created"] == 0
+    assert len(calls) == 1
+    sent_body = calls[0][0].data.decode("utf-8")
+    assert "XYZ" in sent_body
+
+
 def test_store_starts_without_mock_entities():
     assert store.strategies == []
     assert store.signals == []
@@ -1097,6 +1191,67 @@ def test_save_strategy_allows_safe_type_annotations():
     assert response.status_code == 200
 
 
+def test_save_strategy_allows_index_argument_signature():
+    headers = auth_headers("indexed-strategy@example.com")
+    response = client.post(
+        "/api/strategies",
+        json={
+            "name": "indexed strategy",
+            "period": "1H",
+            "description": "uses check_signal(candles, index)",
+            "conditions": ["uses latest index"],
+            "signalType": "trend",
+            "score": 88,
+            "strengthGrade": "A",
+            "pythonCode": (
+                "def check_signal(candles, index):\n"
+                "    return index == len(candles) - 1 and candles[index]['close'] > 0\n"
+            ),
+            "structuredConditions": [
+                {"title": "latest index", "description": "uses latest index", "parameters": ["bars: 240"]}
+            ],
+            "aiAnalysis": ["validation test"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+
+
+def test_save_strategy_allows_dataframe_style_code():
+    headers = auth_headers("dataframe-strategy@example.com")
+    response = client.post(
+        "/api/strategies",
+        json={
+            "name": "dataframe strategy",
+            "period": "1H",
+            "description": "uses pandas dataframe style access",
+            "conditions": ["uses dataframe rolling ma"],
+            "signalType": "trend",
+            "score": 88,
+            "strengthGrade": "A",
+            "pythonCode": (
+                "def check_signal(candles, index: int) -> bool:\n"
+                "    if index < 80:\n"
+                "        return False\n"
+                "    candles = candles.copy()\n"
+                "    candles['ma20'] = candles['close'].rolling(20).mean()\n"
+                "    candles['ma60'] = candles['close'].rolling(60).mean()\n"
+                "    current = candles.iloc[index]\n"
+                "    recent = candles.iloc[index - 30:index]\n"
+                "    return bool(current['ma20'] > current['ma60'] and (recent['close'] > recent['ma20']).mean() >= 0)\n"
+            ),
+            "structuredConditions": [
+                {"title": "dataframe", "description": "uses dataframe", "parameters": ["bars: 80"]}
+            ],
+            "aiAnalysis": ["validation test"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+
+
 def test_save_strategy_rejects_code_that_crashes_during_scan_validation():
     headers = auth_headers("crashing-strategy@example.com")
     response = client.post(
@@ -1121,6 +1276,38 @@ def test_save_strategy_rejects_code_that_crashes_during_scan_validation():
     assert response.status_code == 400
     assert response.json()["code"] == "STRATEGY_VALIDATION_FAILED"
     assert "division by zero" in response.json()["message"]
+
+
+def test_save_strategy_reports_runtime_error_line_number():
+    headers = auth_headers("line-number-strategy@example.com")
+    response = client.post(
+        "/api/strategies",
+        json={
+            "name": "line number strategy",
+            "period": "1H",
+            "description": "runtime error with source line",
+            "conditions": ["always"],
+            "signalType": "trend",
+            "score": 88,
+            "strengthGrade": "A",
+            "pythonCode": (
+                "def check_signal(candles, index):\n"
+                "    latest = candles[index]\n"
+                "    values = [1, 2, 3]\n"
+                "    return values['close'] > 0\n"
+            ),
+            "structuredConditions": [
+                {"title": "always", "description": "always", "parameters": ["bars: 240"]}
+            ],
+            "aiAnalysis": ["validation test"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "STRATEGY_VALIDATION_FAILED"
+    assert "第 4 行" in response.json()["message"]
+    assert "list indices must be integers" in response.json()["message"]
 
 
 def test_save_strategy_rejects_breakout_code_without_price_breakout_check():

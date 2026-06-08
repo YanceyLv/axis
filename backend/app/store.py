@@ -2,8 +2,10 @@ import os
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -31,6 +33,9 @@ from app.models import (
     PushoverSettingsResponse,
     KnowledgeCase,
     MarketKline,
+    NewCoinListing,
+    NewCoinScanResult,
+    NewCoinSchedulerStatus,
     Signal,
     Strategy,
     StrategyScanHistory,
@@ -54,8 +59,10 @@ USER_TABLE = "users"
 SETTINGS_TABLE = "settings"
 STRATEGY_GENERATION_CACHE_TABLE = "strategy_generation_cache"
 MARKET_KLINE_TABLE = "market_klines"
+NEW_COIN_LISTINGS_TABLE = "new_coin_listings"
 SETTINGS_ID = "global"
 logger = logging.getLogger("axis.strategy_generation")
+new_coin_logger = logging.getLogger("axis.new_coin_detection")
 
 
 class Store(Protocol):
@@ -97,6 +104,11 @@ class Store(Protocol):
 
     def market_candles_for_signal(self, signal: Signal, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]: ...
 
+    @property
+    def new_coin_listings(self) -> list[NewCoinListing]: ...
+
+    def scan_new_coin_listings(self) -> NewCoinScanResult: ...
+
     def create_watch_item(self, payload: CreateWatchItemRequest) -> WatchItem: ...
 
     def create_user(self, email: str, password: str) -> tuple[AuthUser, str]: ...
@@ -124,6 +136,7 @@ class SQLiteStore:
             connection.execute(f"DELETE FROM {USER_TABLE}")
             connection.execute(f"DELETE FROM {SETTINGS_TABLE}")
             connection.execute(f"DELETE FROM {STRATEGY_GENERATION_CACHE_TABLE}")
+            connection.execute(f"DELETE FROM {NEW_COIN_LISTINGS_TABLE}")
 
     @property
     def strategies(self) -> list[Strategy]:
@@ -140,6 +153,10 @@ class SQLiteStore:
     @property
     def knowledge_cases(self) -> list[KnowledgeCase]:
         return self._list("knowledge_cases", KnowledgeCase)
+
+    @property
+    def new_coin_listings(self) -> list[NewCoinListing]:
+        return self._list(NEW_COIN_LISTINGS_TABLE, NewCoinListing)
 
     def generate_strategy(self, period: str, conditions: list[str], force_refresh: bool = False) -> GeneratedStrategy:
         cache_key = _strategy_generation_cache_key(period, conditions)
@@ -247,6 +264,9 @@ class SQLiteStore:
 
     def run_strategies_once(self) -> StrategyRunResult:
         return _run_strategies_once(self)
+
+    def scan_new_coin_listings(self) -> NewCoinScanResult:
+        return _scan_new_coin_listings(self)
 
     def get_strategy_run_history(self, limit: int = 8) -> list[StrategyScanHistory]:
         return self._list("strategy_scan_history", StrategyScanHistory)[:limit]
@@ -387,6 +407,17 @@ class SQLiteStore:
             )
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_market_klines_lookup ON {MARKET_KLINE_TABLE} (symbol, period, open_time)"
+            )
+            connection.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {NEW_COIN_LISTINGS_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    sort_order INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
 
     def _is_empty(self) -> bool:
@@ -606,6 +637,7 @@ class MySQLStore:
             cursor.execute(f"DELETE FROM `{USER_TABLE}`")
             cursor.execute(f"DELETE FROM `{SETTINGS_TABLE}`")
             cursor.execute(f"DELETE FROM `{STRATEGY_GENERATION_CACHE_TABLE}`")
+            cursor.execute(f"DELETE FROM `{NEW_COIN_LISTINGS_TABLE}`")
             connection.commit()
 
     @property
@@ -623,6 +655,10 @@ class MySQLStore:
     @property
     def knowledge_cases(self) -> list[KnowledgeCase]:
         return self._list("knowledge_cases", KnowledgeCase)
+
+    @property
+    def new_coin_listings(self) -> list[NewCoinListing]:
+        return self._list(NEW_COIN_LISTINGS_TABLE, NewCoinListing)
 
     def generate_strategy(self, period: str, conditions: list[str], force_refresh: bool = False) -> GeneratedStrategy:
         cache_key = _strategy_generation_cache_key(period, conditions)
@@ -730,6 +766,9 @@ class MySQLStore:
 
     def run_strategies_once(self) -> StrategyRunResult:
         return _run_strategies_once(self)
+
+    def scan_new_coin_listings(self) -> NewCoinScanResult:
+        return _scan_new_coin_listings(self)
 
     def get_strategy_run_history(self, limit: int = 8) -> list[StrategyScanHistory]:
         return self._list("strategy_scan_history", StrategyScanHistory)[:limit]
@@ -899,6 +938,19 @@ class MySQLStore:
                     updated_at VARCHAR(40) NOT NULL,
                     INDEX idx_market_klines_lookup (symbol, period, open_time),
                     INDEX idx_market_klines_open_time (open_time)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS `{NEW_COIN_LISTINGS_TABLE}` (
+                    id VARCHAR(128) PRIMARY KEY,
+                    sort_order INT NOT NULL,
+                    payload JSON NOT NULL,
+                    created_at VARCHAR(40) NOT NULL,
+                    updated_at VARCHAR(40) NOT NULL,
+                    INDEX idx_new_coin_listings_sort_order (sort_order),
+                    INDEX idx_new_coin_listings_created_at (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
@@ -1176,6 +1228,325 @@ def _send_signal_pushover_if_configured(store_instance: Any, signal: Signal) -> 
             return None
     except Exception as exc:
         return str(exc)
+
+
+def _scan_new_coin_listings(store_instance: Any) -> NewCoinScanResult:
+    errors: list[str] = []
+    try:
+        fetched_items = fetch_binance_new_listing_announcements()
+    except Exception as exc:
+        new_coin_logger.warning("New coin scan failed: %s", exc)
+        return NewCoinScanResult(errors=[str(exc)])
+
+    created = 0
+    updated = 0
+    notified = 0
+    saved_items: list[NewCoinListing] = []
+    now = _now_iso()
+
+    for raw_item in fetched_items:
+        try:
+            listing = _normalize_new_coin_listing(raw_item, now)
+            existing = store_instance._get(NEW_COIN_LISTINGS_TABLE, listing.id, NewCoinListing)
+            if existing is None:
+                _store_upsert_front(store_instance, NEW_COIN_LISTINGS_TABLE, listing)
+                created += 1
+                if _new_coin_pushover_enabled(store_instance):
+                    push_error = _send_new_coin_pushover_if_configured(store_instance, listing)
+                    if push_error:
+                        errors.append(f"{listing.symbol}: Pushover push failed: {push_error}")
+                    else:
+                        notified_listing = listing.model_copy(update={"notifiedAt": _now_iso(), "updatedAt": _now_iso()})
+                        store_instance._upsert(
+                            NEW_COIN_LISTINGS_TABLE,
+                            notified_listing,
+                            store_instance._order_for_id(NEW_COIN_LISTINGS_TABLE, listing.id),
+                        )
+                        listing = notified_listing
+                        notified += 1
+            else:
+                listing = listing.model_copy(update={"createdAt": existing.createdAt, "notifiedAt": existing.notifiedAt})
+                if listing.model_dump(exclude={"updatedAt"}) != existing.model_dump(exclude={"updatedAt"}):
+                    store_instance._upsert(
+                        NEW_COIN_LISTINGS_TABLE,
+                        listing,
+                        store_instance._order_for_id(NEW_COIN_LISTINGS_TABLE, listing.id),
+                    )
+                    updated += 1
+                else:
+                    listing = existing
+            saved_items.append(listing)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    return NewCoinScanResult(
+        fetched=len(fetched_items),
+        created=created,
+        updated=updated,
+        notified=notified,
+        errors=errors,
+        listings=saved_items,
+    )
+
+
+def _normalize_new_coin_listing(raw_item: dict[str, Any], now: str) -> NewCoinListing:
+    symbol = str(raw_item.get("symbol") or "").strip().upper()
+    title = str(raw_item.get("title") or "").strip()
+    if not symbol:
+        symbol = _extract_listing_symbols(title)[0] if _extract_listing_symbols(title) else ""
+    if not symbol:
+        raise ValueError(f"Unable to parse listing symbol from: {title}")
+
+    item_id = str(raw_item.get("id") or "").strip()
+    if not item_id:
+        item_id = _new_coin_listing_id("binance", title, str(raw_item.get("announcedAt") or ""))
+
+    status = str(raw_item.get("status") or "discovered").strip().lower()
+    if status not in {"discovered", "upcoming", "listed"}:
+        status = "discovered"
+
+    return NewCoinListing(
+        id=item_id,
+        symbol=symbol,
+        tradingPairs=_normalize_trading_pairs(raw_item.get("tradingPairs"), symbol),
+        title=title or symbol,
+        url=str(raw_item.get("url") or "").strip(),
+        announcedAt=str(raw_item.get("announcedAt") or "").strip() or None,
+        listedAt=str(raw_item.get("listedAt") or "").strip() or None,
+        status=status,  # type: ignore[arg-type]
+        source="binance",
+        notifiedAt=str(raw_item.get("notifiedAt") or "").strip() or None,
+        createdAt=str(raw_item.get("createdAt") or "").strip() or now,
+        updatedAt=now,
+    )
+
+
+def _new_coin_listing_id(source: str, title: str, announced_at: str) -> str:
+    raw = f"{source}:{title}:{announced_at}"
+    return f"newcoin-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _normalize_trading_pairs(value: Any, symbol: str) -> list[str]:
+    raw_items = value if isinstance(value, list) else []
+    pairs: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        pair = str(item).strip().upper().replace("/", "")
+        if not pair or pair in seen:
+            continue
+        pairs.append(pair)
+        seen.add(pair)
+    if pairs:
+        return pairs
+    return [f"{symbol}USDT"] if symbol else []
+
+
+def fetch_binance_new_listing_announcements(limit: int = 20) -> list[dict[str, Any]]:
+    urls = [
+        (
+            "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+            f"?type=1&catalogId=48&pageNo=1&pageSize={limit}"
+        ),
+        (
+            "https://www.binance.com/bapi/composite/v1/public/cms/article/catalog/list/query"
+            f"?catalogId=48&pageNo=1&pageSize={limit}"
+        ),
+    ]
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            raw_payload = _read_url_with_retry(url, timeout=10)
+            payload = json.loads(raw_payload)
+            return _parse_binance_listing_payload(payload)
+        except Exception as exc:
+            last_error = exc
+    assert last_error is not None
+    raise last_error
+
+
+def _parse_binance_listing_payload(payload: Any) -> list[dict[str, Any]]:
+    articles = _collect_binance_articles(payload)
+    listings: list[dict[str, Any]] = []
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        title = str(article.get("title") or "").strip()
+        if not _looks_like_new_listing_title(title):
+            continue
+        symbols = _extract_listing_symbols(title)
+        if not symbols:
+            continue
+        article_id = str(article.get("id") or article.get("code") or article.get("slug") or title)
+        article_code = str(article.get("code") or article.get("slug") or article_id)
+        announced_at = _binance_article_time(article)
+        url = _binance_article_url(article_code)
+        pairs = _extract_trading_pairs(title, symbols)
+        for symbol in symbols:
+            listings.append(
+                {
+                    "id": f"binance-{article_id}-{symbol}".replace(" ", "-"),
+                    "symbol": symbol,
+                    "tradingPairs": [pair for pair in pairs if pair.startswith(symbol)] or [f"{symbol}USDT"],
+                    "title": title,
+                    "url": url,
+                    "announcedAt": announced_at,
+                    "listedAt": None,
+                    "status": "upcoming" if "will" in title.lower() or "即将" in title else "discovered",
+                    "source": "binance",
+                }
+            )
+    return listings
+
+
+def _collect_binance_articles(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+    articles: list[dict[str, Any]] = []
+    for key in ("articles", "catalogs", "data"):
+        child = value.get(key)
+        if key == "articles" and isinstance(child, list):
+            articles.extend(item for item in child if isinstance(item, dict))
+        elif isinstance(child, (dict, list)):
+            articles.extend(_collect_binance_articles(child))
+    return articles
+
+
+def _looks_like_new_listing_title(title: str) -> bool:
+    normalized = title.lower()
+    positive = [
+        "binance will list",
+        "binance lists",
+        "will launch",
+        "new listing",
+        "上线",
+        "上市",
+        "新增",
+    ]
+    negative = ["delist", "remove", "suspend", "redenomination", "airdrop"]
+    return any(word in normalized for word in positive) and not any(word in normalized for word in negative)
+
+
+def _extract_listing_symbols(title: str) -> list[str]:
+    candidates: list[str] = []
+    for group in re.findall(r"\(([A-Z0-9,\s/]+)\)", title):
+        for token in re.split(r"[,/\s]+", group):
+            if _is_listing_symbol_token(token):
+                candidates.append(token.upper())
+    for pair in re.findall(r"\b([A-Z0-9]{2,15})(?:USDT|FDUSD|USDC|BTC|BNB)\b", title):
+        if _is_listing_symbol_token(pair):
+            candidates.append(pair.upper())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        deduped.append(candidate)
+        seen.add(candidate)
+    return deduped[:8]
+
+
+def _is_listing_symbol_token(token: str) -> bool:
+    value = str(token or "").strip().upper()
+    return (
+        2 <= len(value) <= 12
+        and value.isalnum()
+        and value not in {"USDT", "USDC", "FDUSD", "BTC", "ETH", "BNB", "USD", "EUR", "TRY"}
+    )
+
+
+def _extract_trading_pairs(title: str, symbols: list[str]) -> list[str]:
+    pairs = [match.upper().replace("/", "") for match in re.findall(r"\b[A-Z0-9]{2,15}(?:USDT|FDUSD|USDC|BTC|BNB)\b", title)]
+    if pairs:
+        return pairs
+    return [f"{symbol}USDT" for symbol in symbols]
+
+
+def _binance_article_time(article: dict[str, Any]) -> str | None:
+    for key in ("releaseDate", "publishDate", "publishedAt", "createdAt"):
+        value = article.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, (int, float)):
+                timestamp = float(value)
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000
+                return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+            return str(value)
+        except Exception:
+            continue
+    return None
+
+
+def _binance_article_url(article_code: str) -> str:
+    code = str(article_code or "").strip()
+    if code.startswith("http"):
+        return code
+    return f"https://www.binance.com/en/support/announcement/{code}" if code else "https://www.binance.com/en/support/announcement"
+
+
+def _new_coin_pushover_enabled(store_instance: Any) -> bool:
+    try:
+        raw_settings = store_instance._get_raw_settings()
+    except Exception:
+        return False
+    pushover = raw_settings.get("pushover") if isinstance(raw_settings.get("pushover"), dict) else {}
+    return bool(pushover.get("enabled") and pushover.get("userKey") and pushover.get("appToken"))
+
+
+def _send_new_coin_pushover_if_configured(store_instance: Any, listing: NewCoinListing) -> str | None:
+    try:
+        raw_settings = store_instance._get_raw_settings()
+    except Exception as exc:
+        return f"读取推送配置失败：{exc}"
+
+    pushover = raw_settings.get("pushover") if isinstance(raw_settings.get("pushover"), dict) else {}
+    if not pushover.get("enabled"):
+        return None
+
+    user_key = str(pushover.get("userKey") or "").strip()
+    app_token = str(pushover.get("appToken") or "").strip()
+    if not user_key or not app_token:
+        return "Pushover 已启用但 User Key 或 Application Token 未配置"
+
+    message = "\n".join(
+        [
+            f"币种：{listing.symbol}",
+            f"交易对：{', '.join(listing.tradingPairs) or '-'}",
+            f"状态：{_new_coin_status_label(listing.status)}",
+            f"公告：{listing.title}",
+            f"链接：{listing.url}",
+        ]
+    )
+    payload = urllib.parse.urlencode(
+        {
+            "token": app_token,
+            "user": user_key,
+            "title": f"TrendAI 新币提醒：{listing.symbol}",
+            "message": message,
+            "priority": "0",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.pushover.net/1/messages.json",
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            if response.status >= 400:
+                return f"HTTP {response.status}"
+            return None
+    except Exception as exc:
+        return str(exc)
+
+
+def _new_coin_status_label(status: str) -> str:
+    labels = {"discovered": "已发现", "upcoming": "即将上线", "listed": "已上线"}
+    return labels.get(status, status)
 
 
 def _market_kline_retention_cutoffs() -> dict[str, str]:
@@ -1792,6 +2163,80 @@ def _strategy_scheduler_loop(store_instance: Any, check_interval_seconds: int, s
                 _scheduler_state["lastError"] = str(exc)
 
 
+_new_coin_scheduler_lock = threading.Lock()
+_new_coin_scheduler_stop_event: threading.Event | None = None
+_new_coin_scheduler_thread: threading.Thread | None = None
+_new_coin_scheduler_state: dict[str, Any] = {
+    "running": False,
+    "checkIntervalSeconds": 180,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastError": "",
+}
+
+
+def run_new_coin_scheduler_tick(store_instance: Any) -> NewCoinScanResult:
+    with _new_coin_scheduler_lock:
+        _new_coin_scheduler_state["lastCheckedAt"] = _now_iso()
+        _new_coin_scheduler_state["lastError"] = ""
+    result = store_instance.scan_new_coin_listings()
+    with _new_coin_scheduler_lock:
+        _new_coin_scheduler_state["lastTriggeredAt"] = _now_iso()
+        if result.errors:
+            _new_coin_scheduler_state["lastError"] = "\n".join(result.errors[:3])
+    return result
+
+
+def start_new_coin_scheduler(store_instance: Any, check_interval_seconds: int = 180) -> None:
+    global _new_coin_scheduler_stop_event, _new_coin_scheduler_thread
+    with _new_coin_scheduler_lock:
+        if _new_coin_scheduler_thread is not None and _new_coin_scheduler_thread.is_alive():
+            return
+        _new_coin_scheduler_stop_event = threading.Event()
+        _new_coin_scheduler_state.update(
+            {
+                "running": True,
+                "checkIntervalSeconds": check_interval_seconds,
+                "lastError": "",
+            }
+        )
+        _new_coin_scheduler_thread = threading.Thread(
+            target=_new_coin_scheduler_loop,
+            args=(store_instance, check_interval_seconds, _new_coin_scheduler_stop_event),
+            daemon=True,
+        )
+        _new_coin_scheduler_thread.start()
+
+
+def stop_new_coin_scheduler() -> None:
+    global _new_coin_scheduler_stop_event, _new_coin_scheduler_thread
+    with _new_coin_scheduler_lock:
+        stop_event = _new_coin_scheduler_stop_event
+        thread = _new_coin_scheduler_thread
+        _new_coin_scheduler_stop_event = None
+        _new_coin_scheduler_thread = None
+        _new_coin_scheduler_state["running"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def get_new_coin_scheduler_status() -> NewCoinSchedulerStatus:
+    with _new_coin_scheduler_lock:
+        return NewCoinSchedulerStatus(**_new_coin_scheduler_state)
+
+
+def _new_coin_scheduler_loop(store_instance: Any, check_interval_seconds: int, stop_event: threading.Event) -> None:
+    while not stop_event.wait(check_interval_seconds):
+        try:
+            run_new_coin_scheduler_tick(store_instance)
+        except Exception as exc:
+            with _new_coin_scheduler_lock:
+                _new_coin_scheduler_state["lastCheckedAt"] = _now_iso()
+                _new_coin_scheduler_state["lastError"] = str(exc)
+
+
 def _normalize_symbol_blacklist(symbols: list[str] | None) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1899,16 +2344,76 @@ def _execute_strategy_code(code: str, candles: list[Any], strict_return: bool = 
         }
     }
     namespace.update({"Any": Any})
-    exec(compile(code, "<strategy-runtime>", "exec"), namespace, namespace)
+    try:
+        exec(compile(code, "<strategy-runtime>", "exec"), namespace, namespace)
+    except Exception as exc:
+        raise ValueError(_format_strategy_exception(exc)) from exc
     check_signal = namespace.get("check_signal")
     if not callable(check_signal):
         raise ValueError("策略代码缺少 check_signal(candles) 函数")
 
     candle_payload = [candle.model_dump() if isinstance(candle, BaseModel) else candle for candle in candles]
-    result = check_signal(candle_payload)
+    if _strategy_uses_dataframe_style(code):
+        candle_payload = _strategy_dataframe_payload(candle_payload)
+    try:
+        result = _call_check_signal(check_signal, candle_payload)
+    except Exception as exc:
+        raise ValueError(_format_strategy_exception(exc)) from exc
     if strict_return and not isinstance(result, bool):
         raise ValueError("check_signal(candles) 必须返回 bool 类型 True 或 False")
     return bool(result)
+
+
+def _strategy_uses_dataframe_style(code: str) -> bool:
+    return bool(
+        re.search(r"\bcandles\s*\[\s*['\"]", code)
+        or ".iloc" in code
+        or ".loc" in code
+        or ".rolling(" in code
+        or ".between(" in code
+    )
+
+
+def _strategy_dataframe_payload(candle_payload: list[Any]) -> Any:
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ValueError("策略代码使用了 DataFrame 写法，但后端未安装 pandas，请执行 pip install -r backend/requirements.txt") from exc
+
+    return pd.DataFrame(candle_payload)
+
+
+def _call_check_signal(check_signal: Any, candle_payload: list[Any]) -> Any:
+    try:
+        signature = inspect.signature(check_signal)
+        required_positionals = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+            and parameter.default is parameter.empty
+        ]
+    except (TypeError, ValueError):
+        required_positionals = []
+
+    if len(required_positionals) >= 2:
+        return check_signal(candle_payload, max(0, len(candle_payload) - 1))
+    return check_signal(candle_payload)
+
+
+def _format_strategy_exception(exc: Exception) -> str:
+    if isinstance(exc, SyntaxError) and exc.lineno is not None:
+        return f"第 {exc.lineno} 行：{exc.msg}"
+
+    line_number: int | None = None
+    traceback = exc.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code.co_filename == "<strategy-runtime>":
+            line_number = traceback.tb_lineno
+        traceback = traceback.tb_next
+
+    if line_number is not None:
+        return f"第 {line_number} 行：{exc}"
+    return str(exc)
 
 
 def _validate_strategy_payload(payload: CreateStrategyRequest | UpdateStrategyRequest) -> None:

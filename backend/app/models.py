@@ -7,6 +7,7 @@ Period = Literal["1H", "4H", "1D"]
 StrengthGrade = Literal["S", "A", "B", "C"]
 WatchStatus = Literal["pending", "matched", "unmatched"]
 GenerationSource = Literal["llm", "fallback"]
+NewCoinListingStatus = Literal["discovered", "upcoming", "listed"]
 
 
 class Candle(BaseModel):
@@ -201,6 +202,38 @@ class StrategySchedulerStatus(BaseModel):
     lastCheckedAt: str | None = None
     lastTriggeredAt: str | None = None
     dueStrategies: int = 0
+    lastError: str = ""
+
+
+class NewCoinListing(BaseModel):
+    id: str
+    symbol: str
+    tradingPairs: list[str] = Field(default_factory=list)
+    title: str
+    url: str
+    announcedAt: str | None = None
+    listedAt: str | None = None
+    status: NewCoinListingStatus = "discovered"
+    source: Literal["binance"] = "binance"
+    notifiedAt: str | None = None
+    createdAt: str
+    updatedAt: str
+
+
+class NewCoinScanResult(BaseModel):
+    fetched: int = 0
+    created: int = 0
+    updated: int = 0
+    notified: int = 0
+    errors: list[str] = Field(default_factory=list)
+    listings: list[NewCoinListing] = Field(default_factory=list)
+
+
+class NewCoinSchedulerStatus(BaseModel):
+    running: bool = False
+    checkIntervalSeconds: int = 180
+    lastCheckedAt: str | None = None
+    lastTriggeredAt: str | None = None
     lastError: str = ""
 
 

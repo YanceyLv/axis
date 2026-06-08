@@ -6,6 +6,8 @@ import type {
   DashboardSummary,
   GeneratedStrategy,
   KnowledgeCase,
+  NewCoinListing,
+  NewCoinScanResult,
   Period,
   Signal,
   Strategy,
@@ -109,6 +111,12 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   dashboard: () => request<DashboardSummary>("/api/dashboard/summary"),
+  newCoins: () => request<NewCoinListing[]>("/api/new-coins"),
+  scanNewCoins: () =>
+    request<NewCoinScanResult>("/api/new-coins/scan", {
+      method: "POST",
+      headers: jsonHeaders
+    }),
   strategies: async () => (await request<Strategy[]>("/api/strategies")).map(normalizeStrategy),
   generateStrategy: (period: Period, conditions: string[], forceRefresh = false) =>
     request<GeneratedStrategy>("/api/strategies/generate", {

@@ -230,6 +230,125 @@ select:focus {
   margin-bottom: 0;
 }
 
+.new-coins-page {
+  align-content: start;
+  gap: 12px;
+}
+
+.new-coins-page .page-header {
+  min-height: auto;
+  margin-bottom: 0;
+}
+
+.new-coin-kpis {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.new-coin-source-card {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px 10px;
+  min-height: 74px;
+}
+
+.new-coin-source-card svg {
+  grid-row: 1 / span 2;
+  color: var(--primary);
+}
+
+.new-coin-source-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.new-coin-source-card strong {
+  color: #111827;
+  font-size: 17px;
+  line-height: 1.2;
+}
+
+.new-coin-table-panel .table {
+  table-layout: fixed;
+}
+
+.new-coin-table-panel .table th:nth-child(1),
+.new-coin-table-panel .table td:nth-child(1) {
+  width: 116px;
+}
+
+.new-coin-table-panel .table th:nth-child(2),
+.new-coin-table-panel .table td:nth-child(2) {
+  width: 160px;
+}
+
+.new-coin-table-panel .table th:nth-child(3),
+.new-coin-table-panel .table td:nth-child(3),
+.new-coin-table-panel .table th:nth-child(6),
+.new-coin-table-panel .table td:nth-child(6),
+.new-coin-table-panel .table th:nth-child(7),
+.new-coin-table-panel .table td:nth-child(7) {
+  width: 112px;
+}
+
+.new-coin-table-panel .table th:nth-child(5),
+.new-coin-table-panel .table td:nth-child(5) {
+  width: 170px;
+}
+
+.new-coin-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.new-coin-pairs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.new-coin-pairs span,
+.new-coin-status,
+.new-coin-notified {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.new-coin-pairs span {
+  background: #eef2ff;
+  color: var(--primary);
+}
+
+.new-coin-status.upcoming {
+  background: #fff7ed;
+  color: #c56d0b;
+}
+
+.new-coin-status.discovered {
+  background: #eef2ff;
+  color: var(--primary);
+}
+
+.new-coin-status.listed,
+.new-coin-notified {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.new-coin-notified {
+  gap: 5px;
+}
+
+.new-coin-link {
+  text-decoration: none;
+}
+
 .watchlist-table-panel {
   overflow: hidden;
 }

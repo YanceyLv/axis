@@ -168,6 +168,32 @@ export interface StrategyScanHistory {
   skippedSymbols: number;
 }
 
+export type NewCoinListingStatus = "discovered" | "upcoming" | "listed";
+
+export interface NewCoinListing {
+  id: string;
+  symbol: string;
+  tradingPairs: string[];
+  title: string;
+  url: string;
+  announcedAt: string | null;
+  listedAt: string | null;
+  status: NewCoinListingStatus;
+  source: "binance";
+  notifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NewCoinScanResult {
+  fetched: number;
+  created: number;
+  updated: number;
+  notified: number;
+  errors: string[];
+  listings: NewCoinListing[];
+}
+
 export interface AuthUser {
   id: string;
   email: string;

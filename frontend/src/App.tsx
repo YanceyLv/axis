@@ -4,6 +4,7 @@ import { AppShell, type ViewKey } from "./components/AppShell";
 import { AuthPage } from "./pages/AuthPage";
 import { Dashboard } from "./pages/Dashboard";
 import { KnowledgeCase } from "./pages/KnowledgeCase";
+import { NewCoins } from "./pages/NewCoins";
 import { SignalDetail } from "./pages/SignalDetail";
 import { Signals } from "./pages/Signals";
 import { Settings } from "./pages/Settings";
@@ -18,6 +19,7 @@ import type {
   DashboardSummary,
   GeneratedStrategy,
   KnowledgeCase as KnowledgeCaseType,
+  NewCoinListing,
   Period,
   Signal,
   Strategy,
@@ -45,6 +47,7 @@ export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
+  const [newCoins, setNewCoins] = useState<NewCoinListing[]>([]);
   const [selectedSignalDetail, setSelectedSignalDetail] = useState<Signal | null>(null);
   const [watchlist, setWatchlist] = useState<WatchItem[]>([]);
   const [knowledgeCase, setKnowledgeCase] = useState<KnowledgeCaseType | null>(null);
@@ -73,15 +76,17 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const [dashboardData, strategyData, signalData, watchData] = await Promise.all([
+      const [dashboardData, strategyData, signalData, newCoinData, watchData] = await Promise.all([
         api.dashboard(),
         api.strategies(),
         api.signals(),
+        api.newCoins(),
         api.watchlist()
       ]);
       setDashboard(dashboardData);
       setStrategies(strategyData);
       setSignals(signalData);
+      setNewCoins(newCoinData);
       setWatchlist(watchData);
       setKnowledgeCase(null);
     } catch (err) {
@@ -265,6 +270,12 @@ export default function App() {
     return api.startStrategyRun();
   }
 
+  async function handleScanNewCoins() {
+    const result = await api.scanNewCoins();
+    setNewCoins(await api.newCoins());
+    return result;
+  }
+
   async function handleLoadStrategyRunStatus() {
     return api.strategyRunStatus();
   }
@@ -386,6 +397,8 @@ export default function App() {
         );
       case "signals":
         return <Signals signals={signals} onOpenSignal={openSignal} />;
+      case "new-coins":
+        return <NewCoins listings={newCoins} onScan={handleScanNewCoins} />;
       case "signal-detail":
         return (
           <SignalDetail

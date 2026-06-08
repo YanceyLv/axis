@@ -2,9 +2,10 @@ import {
   BarChart3,
   BellRing,
   BookOpen,
-  LogOut,
   Eye,
   Home,
+  LogOut,
+  Rocket,
   Settings,
   Sparkles,
 } from "lucide-react";
@@ -15,6 +16,7 @@ export type ViewKey =
   | "strategies"
   | "signals"
   | "signal-detail"
+  | "new-coins"
   | "watchlist"
   | "watch-detail"
   | "knowledge"
@@ -36,6 +38,7 @@ const navItems: Array<{
   { key: "dashboard", label: "首页", icon: Home },
   { key: "strategies", label: "策略中心", icon: Sparkles },
   { key: "signals", label: "信号中心", icon: BellRing },
+  { key: "new-coins", label: "新币检测", icon: Rocket },
   { key: "watchlist", label: "观察池", icon: Eye },
   { key: "knowledge", label: "知识库", icon: BookOpen },
 ];
@@ -78,7 +81,7 @@ export function AppShell({ activeView, onNavigate, userEmail, onLogout, children
           <span>{userEmail}</span>
           <button className="settings-button" type="button" aria-label="退出登录" onClick={onLogout}>
             <LogOut size={18} aria-hidden="true" />
-            <span>退出</span>
+            <span>退出登录</span>
           </button>
           <button className="settings-button" type="button" aria-label="设置" onClick={() => onNavigate("settings")}>
             <Settings size={18} aria-hidden="true" />
