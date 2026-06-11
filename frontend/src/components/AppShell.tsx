@@ -1,10 +1,12 @@
-import {
+﻿import {
   BarChart3,
   BellRing,
   BookOpen,
+  Database,
   Eye,
   Home,
   LogOut,
+  Radar,
   Rocket,
   Settings,
   Sparkles,
@@ -13,6 +15,8 @@ import type { ReactNode } from "react";
 
 export type ViewKey =
   | "dashboard"
+  | "market-radar"
+  | "market-data"
   | "strategies"
   | "signals"
   | "signal-detail"
@@ -35,10 +39,12 @@ const navItems: Array<{
   label: string;
   icon: typeof Home;
 }> = [
+  { key: "market-radar", label: "市场雷达", icon: Radar },
+  { key: "market-data", label: "数据采集", icon: Database },
   { key: "dashboard", label: "首页", icon: Home },
   { key: "strategies", label: "策略中心", icon: Sparkles },
   { key: "signals", label: "信号中心", icon: BellRing },
-  { key: "new-coins", label: "新币检测", icon: Rocket },
+  { key: "new-coins", label: "新币监测", icon: Rocket },
   { key: "watchlist", label: "观察池", icon: Eye },
   { key: "knowledge", label: "知识库", icon: BookOpen },
 ];

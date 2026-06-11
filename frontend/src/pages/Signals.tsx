@@ -13,7 +13,7 @@ type PeriodFilter = Period | "all";
 type SignalTypeFilter = "all" | "trend" | "watch" | "momentum" | "other";
 type TimeFilter = "all" | "today" | "7d" | "30d" | "custom";
 
-const periods: Period[] = ["1H", "4H", "1D"];
+const periods: Period[] = ["5M", "15M", "1H", "4H", "1D"];
 const pageSizeOptions = [10, 20, 50];
 
 export function Signals({ signals, onOpenSignal }: SignalsProps) {
@@ -168,6 +168,7 @@ export function Signals({ signals, onOpenSignal }: SignalsProps) {
               <th>类型</th>
               <th>价格</th>
               <th>评分</th>
+              <th>后续表现</th>
               <th>触发时间</th>
               <th>操作</th>
             </tr>
@@ -181,6 +182,7 @@ export function Signals({ signals, onOpenSignal }: SignalsProps) {
                 <td><span className="chip">{signalTypeLabel(signal.signalType)}</span></td>
                 <td>{formatPrice(signal.price)}</td>
                 <td>{signal.score}</td>
+                <td>{performanceLabel(signal)}</td>
                 <td>{formatDateTime(signal.triggeredAt)}</td>
                 <td>
                   <button className="secondary compact" onClick={() => onOpenSignal(signal.id)} type="button">
@@ -192,7 +194,7 @@ export function Signals({ signals, onOpenSignal }: SignalsProps) {
             ))}
             {!pagedSignals.length ? (
               <tr>
-                <td className="empty-table-cell" colSpan={8}>没有符合筛选条件的信号</td>
+                <td className="empty-table-cell" colSpan={9}>没有符合筛选条件的信号</td>
               </tr>
             ) : null}
           </tbody>
@@ -269,4 +271,28 @@ function signalTypeLabel(signalType: string): string {
   if (normalized === "watch") return "观察池";
   if (normalized === "momentum") return "动量信号";
   return signalType || "其他类型";
+}
+
+function performanceLabel(signal: Signal): string {
+  const performance = signal.performance;
+  if (!performance) return "待追踪";
+  if (performance.status === "tracking") return "追踪中";
+  if (performance.status === "insufficient_data") return "数据不足";
+  const result = performance.reviewResult ? reviewResultLabel(performance.reviewResult) : "待复盘";
+  const change = formatPercent(performance.change24hPct);
+  return `${result} / 24h ${change}`;
+}
+
+function reviewResultLabel(result: NonNullable<Signal["performance"]>["reviewResult"]): string {
+  if (result === "effective") return "有效";
+  if (result === "weak") return "偏弱";
+  if (result === "failed") return "失败";
+  if (result === "insufficient_data") return "数据不足";
+  return "待复盘";
+}
+
+function formatPercent(value: number | null): string {
+  if (value === null) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
 }

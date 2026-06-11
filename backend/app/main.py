@@ -6,11 +6,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.errors import ApiError, api_error_handler
-from app.routers import auth, dashboard, knowledge, new_coins, settings, signals, strategies, watchlist
+from app.routers import auth, dashboard, knowledge, market, new_coins, settings, signals, strategies, watchlist
 from app.store import (
+    start_market_kline_backfill_scheduler,
+    start_market_kline_cleanup_scheduler,
+    start_market_kline_collection_scheduler,
+    start_market_kline_coverage_snapshot_scheduler,
     start_new_coin_scheduler,
+    start_signal_cleanup_scheduler,
+    start_signal_performance_scheduler,
     start_strategy_scheduler,
+    stop_market_kline_backfill_scheduler,
+    stop_market_kline_cleanup_scheduler,
+    stop_market_kline_collection_scheduler,
+    stop_market_kline_coverage_snapshot_scheduler,
     stop_new_coin_scheduler,
+    stop_signal_cleanup_scheduler,
+    stop_signal_performance_scheduler,
     stop_strategy_scheduler,
     store,
 )
@@ -18,13 +30,25 @@ from app.store import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    start_market_kline_cleanup_scheduler(store)
+    start_market_kline_coverage_snapshot_scheduler(store)
+    start_market_kline_backfill_scheduler(store)
+    start_market_kline_collection_scheduler(store)
     start_strategy_scheduler(store)
     start_new_coin_scheduler(store)
+    start_signal_cleanup_scheduler(store)
+    start_signal_performance_scheduler(store)
     try:
         yield
     finally:
+        stop_signal_performance_scheduler()
+        stop_signal_cleanup_scheduler()
         stop_new_coin_scheduler()
         stop_strategy_scheduler()
+        stop_market_kline_collection_scheduler()
+        stop_market_kline_backfill_scheduler()
+        stop_market_kline_coverage_snapshot_scheduler()
+        stop_market_kline_cleanup_scheduler()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -84,6 +108,7 @@ async def require_api_auth(request, call_next):
 app.include_router(dashboard.router)
 app.include_router(auth.router)
 app.include_router(settings.router)
+app.include_router(market.router)
 app.include_router(new_coins.router)
 app.include_router(strategies.router)
 app.include_router(signals.router)

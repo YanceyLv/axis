@@ -6,14 +6,14 @@ import inspect
 import json
 import logging
 import re
-import sqlite3
 import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -33,10 +33,23 @@ from app.models import (
     PushoverSettingsResponse,
     KnowledgeCase,
     MarketKline,
+    MarketKlineBackfillTask,
+    MarketKlineCoverage,
+    MarketKlinePeriodProgress,
+    MarketKlineRecentTask,
+    MarketKlineRunningTask,
+    MarketKlineStatusResponse,
+    MarketKlineTaskCard,
+    MarketRadarEnvironment,
+    MarketRadarMetrics,
+    MarketRadarRecommendation,
+    MarketRadarResponse,
     NewCoinListing,
     NewCoinScanResult,
     NewCoinSchedulerStatus,
     Signal,
+    SignalPerformance,
+    StrategyLesson,
     Strategy,
     StrategyScanHistory,
     StrategyRunError,
@@ -49,16 +62,35 @@ from app.models import (
 )
 
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "data" / "axis.sqlite3"
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 CLOSED_KLINE_LIMIT = 240
+INCREMENTAL_KLINE_LIMIT = 5
+BACKFILL_PAGE_LIMIT = 1500
+BACKFILL_MAX_PAIRS_PER_TICK = 20
+BACKFILL_MAX_PAGES_PER_PAIR = 2
+BACKFILL_REQUEST_SLEEP_SECONDS = 0
+MARKET_KLINE_CLEANUP_BATCH_SIZE = 10000
+MARKET_KLINE_COLLECTION_PERIODS = ("5M", "15M", "1H", "4H", "1D")
+MARKET_KLINE_NATIVE_PERIODS = ("5M", "1D")
+MARKET_KLINE_DERIVED_PERIODS = ("15M", "1H", "4H")
+MARKET_KLINE_PRIORITY_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 SCHEDULER_BOUNDARY_GRACE_SECONDS = 180
 ModelT = TypeVar("ModelT", bound=BaseModel)
-ENTITY_TABLES = ("strategies", "signals", "watch_items", "knowledge_cases", "strategy_scan_history")
+ENTITY_TABLES = (
+    "strategies",
+    "signals",
+    "watch_items",
+    "knowledge_cases",
+    "strategy_scan_history",
+    "signal_performance",
+    "strategy_lessons",
+    "market_kline_backfill_tasks",
+)
 USER_TABLE = "users"
 SETTINGS_TABLE = "settings"
 STRATEGY_GENERATION_CACHE_TABLE = "strategy_generation_cache"
 MARKET_KLINE_TABLE = "market_klines"
+MARKET_KLINE_COVERAGE_TABLE = "market_kline_coverage_snapshots"
 NEW_COIN_LISTINGS_TABLE = "new_coin_listings"
 SETTINGS_ID = "global"
 logger = logging.getLogger("axis.strategy_generation")
@@ -100,9 +132,46 @@ class Store(Protocol):
 
     def save_strategy_scan_history(self, item: StrategyScanHistory) -> None: ...
 
+    def delete_old_signals(self, now: datetime | None = None, retention_days: int = 30) -> int: ...
+
     def upsert_market_candles(self, symbol: str, period: str, candles: list[Candle]) -> None: ...
 
+    def delete_old_market_klines(
+        self,
+        now: datetime | None = None,
+        batch_size: int = MARKET_KLINE_CLEANUP_BATCH_SIZE,
+    ) -> dict[str, int]: ...
+
+    def latest_market_candles(self, symbol: str, period: str, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]: ...
+
+    def market_candles_for_symbol_period(self, symbol: str, period: str) -> list[Candle]: ...
+
+    def market_kline_status(self) -> MarketKlineStatusResponse: ...
+
+    def market_kline_coverage_snapshot(self) -> list[MarketKlineCoverage]: ...
+
+    def refresh_market_kline_coverage_snapshot(
+        self, period: str, now: datetime | None = None
+    ) -> MarketKlineCoverage: ...
+
+    def market_radar(self) -> MarketRadarResponse: ...
+
     def market_candles_for_signal(self, signal: Signal, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]: ...
+
+    @property
+    def market_kline_backfill_tasks(self) -> list[MarketKlineBackfillTask]: ...
+
+    def upsert_market_kline_backfill_task(self, task: MarketKlineBackfillTask) -> None: ...
+
+    def market_kline_time_range(self, symbol: str, period: str) -> tuple[datetime | None, datetime | None]: ...
+
+    def performance_for_signal(self, signal_id: str) -> SignalPerformance | None: ...
+
+    def upsert_signal_performance(self, performance: SignalPerformance) -> None: ...
+
+    def lessons_for_strategy(self, strategy_id: str, limit: int = 10) -> list[StrategyLesson]: ...
+
+    def create_strategy_lesson(self, lesson: StrategyLesson) -> StrategyLesson: ...
 
     @property
     def new_coin_listings(self) -> list[NewCoinListing]: ...
@@ -121,493 +190,6 @@ class Store(Protocol):
 
     def update_settings(self, payload: AppSettingsUpdate) -> AppSettingsResponse: ...
 
-
-class SQLiteStore:
-    def __init__(self, db_path: str | Path | None = None) -> None:
-        self.db_path = Path(db_path or os.getenv("SIGNAL_DB_PATH", DEFAULT_DB_PATH))
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    def reset(self) -> None:
-        with self._connect() as connection:
-            for table in ENTITY_TABLES:
-                connection.execute(f"DELETE FROM {table}")
-            connection.execute(f"DELETE FROM {MARKET_KLINE_TABLE}")
-            connection.execute(f"DELETE FROM {USER_TABLE}")
-            connection.execute(f"DELETE FROM {SETTINGS_TABLE}")
-            connection.execute(f"DELETE FROM {STRATEGY_GENERATION_CACHE_TABLE}")
-            connection.execute(f"DELETE FROM {NEW_COIN_LISTINGS_TABLE}")
-
-    @property
-    def strategies(self) -> list[Strategy]:
-        return self._list("strategies", Strategy)
-
-    @property
-    def signals(self) -> list[Signal]:
-        return self._list("signals", Signal)
-
-    @property
-    def watchlist(self) -> list[WatchItem]:
-        return self._list("watch_items", WatchItem)
-
-    @property
-    def knowledge_cases(self) -> list[KnowledgeCase]:
-        return self._list("knowledge_cases", KnowledgeCase)
-
-    @property
-    def new_coin_listings(self) -> list[NewCoinListing]:
-        return self._list(NEW_COIN_LISTINGS_TABLE, NewCoinListing)
-
-    def generate_strategy(self, period: str, conditions: list[str], force_refresh: bool = False) -> GeneratedStrategy:
-        cache_key = _strategy_generation_cache_key(period, conditions)
-        if not force_refresh:
-            cached = self._get_strategy_generation_cache(cache_key)
-            if cached is not None and not _has_placeholder_python_code(cached.pythonCode):
-                return cached.model_copy(update={"generationCached": True})
-
-        generated = _generate_strategy_preview(period, conditions, self._get_raw_settings())
-        if generated.generationSource == "llm":
-            self._upsert_strategy_generation_cache(cache_key, generated)
-        return generated
-
-    def generate_strategy_from_code(self, period: str, python_code: str) -> GeneratedStrategy:
-        return _generate_strategy_from_code_preview(period, python_code, self._get_raw_settings())
-
-    def create_strategy(self, payload: CreateStrategyRequest) -> Strategy:
-        _validate_strategy_payload(payload)
-        strategy = Strategy(
-            id=f"st-{uuid4().hex[:8]}",
-            name=payload.name,
-            source="ai",
-            period=payload.period,
-            enabled=True,
-            conditions=payload.conditions,
-            description=payload.description,
-            score=payload.score,
-            todaySignalCount=0,
-            lastTriggeredAt=None,
-            createdAt=_now_iso(),
-            symbolBlacklist=_normalize_symbol_blacklist(payload.symbolBlacklist),
-            runtime=StrategyRuntime(
-                code=payload.pythonCode,
-                structuredConditions=payload.structuredConditions,
-                aiAnalysis=payload.aiAnalysis,
-            ),
-            schedule=StrategySchedule(
-                enabled=payload.scheduleEnabled,
-                intervalSeconds=payload.intervalSeconds,
-            ),
-        )
-        self._upsert("strategies", strategy, self._next_front_order("strategies"))
-        return strategy
-
-    def set_strategy_enabled(self, strategy_id: str, enabled: bool) -> Strategy | None:
-        strategy = self._get("strategies", strategy_id, Strategy)
-        if strategy is None:
-            return None
-
-        updated = strategy.model_copy(update={"enabled": enabled})
-        self._upsert("strategies", updated, self._order_for_id("strategies", strategy_id))
-        return updated
-
-    def set_strategy_schedule_enabled(self, strategy_id: str, enabled: bool) -> Strategy | None:
-        strategy = self._get("strategies", strategy_id, Strategy)
-        if strategy is None:
-            return None
-
-        updated = strategy.model_copy(update={"schedule": strategy.schedule.model_copy(update={"enabled": enabled})})
-        self._upsert("strategies", updated, self._order_for_id("strategies", strategy_id))
-        return updated
-
-    def update_strategy(self, strategy_id: str, payload: UpdateStrategyRequest) -> Strategy | None:
-        strategy = self._get("strategies", strategy_id, Strategy)
-        if strategy is None:
-            return None
-        if strategy.enabled:
-            raise ValueError("运行中的策略不能编辑，请先暂停策略")
-        _validate_strategy_payload(payload)
-
-        updated = strategy.model_copy(
-            update={
-                "name": payload.name,
-                "period": payload.period,
-                "enabled": payload.enabled,
-                "conditions": payload.conditions,
-                "description": payload.description,
-                "score": payload.score,
-                "symbolBlacklist": _normalize_symbol_blacklist(payload.symbolBlacklist),
-                "runtime": StrategyRuntime(
-                    code=payload.pythonCode,
-                    structuredConditions=payload.structuredConditions,
-                    aiAnalysis=payload.aiAnalysis,
-                ),
-                "schedule": strategy.schedule.model_copy(
-                    update={
-                        "enabled": payload.scheduleEnabled,
-                        "intervalSeconds": payload.intervalSeconds,
-                    }
-                ),
-            }
-        )
-        self._upsert("strategies", updated, self._order_for_id("strategies", strategy_id))
-        return updated
-
-    def delete_strategy(self, strategy_id: str) -> bool | None:
-        strategy = self._get("strategies", strategy_id, Strategy)
-        if strategy is None:
-            return None
-        if strategy.enabled:
-            raise ValueError("运行中的策略不能删除，请先暂停策略")
-
-        self._delete("strategies", strategy_id)
-        return True
-
-    def run_strategies_once(self) -> StrategyRunResult:
-        return _run_strategies_once(self)
-
-    def scan_new_coin_listings(self) -> NewCoinScanResult:
-        return _scan_new_coin_listings(self)
-
-    def get_strategy_run_history(self, limit: int = 8) -> list[StrategyScanHistory]:
-        return self._list("strategy_scan_history", StrategyScanHistory)[:limit]
-
-    def save_strategy_scan_history(self, item: StrategyScanHistory) -> None:
-        self._upsert("strategy_scan_history", item, self._next_front_order("strategy_scan_history"))
-
-    def create_watch_item(self, payload: CreateWatchItemRequest) -> WatchItem:
-        current_price, change_24h = self._market_data_for_symbol(payload.symbol)
-        watch_item = WatchItem(
-            id=f"watch-{uuid4().hex[:8]}",
-            symbol=payload.symbol,
-            currentPrice=current_price,
-            change24h=change_24h,
-            conditions=payload.conditions,
-            lastTriggeredAt=None,
-            createdAt=_now_iso(),
-        )
-        self._upsert("watch_items", watch_item, self._next_front_order("watch_items"))
-        return watch_item
-
-    def create_user(self, email: str, password: str) -> tuple[AuthUser, str]:
-        normalized_email = _normalize_email(email)
-        user = AuthUser(id=f"user-{uuid4().hex[:12]}", email=normalized_email, createdAt=_now_iso())
-        password_hash = _hash_password(password)
-        token = _make_token()
-        with self._connect() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO {USER_TABLE} (id, email, password_hash, token, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (user.id, user.email, password_hash, token, user.createdAt, user.createdAt),
-            )
-        return user, token
-
-    def authenticate_user(self, email: str, password: str) -> tuple[AuthUser, str] | None:
-        normalized_email = _normalize_email(email)
-        with self._connect() as connection:
-            row = connection.execute(
-                f"SELECT id, email, password_hash, token, created_at FROM {USER_TABLE} WHERE email = ?",
-                (normalized_email,),
-            ).fetchone()
-
-        if row is None or not _verify_password(password, row[2]):
-            return None
-
-        return AuthUser(id=row[0], email=row[1], createdAt=row[4]), row[3]
-
-    def user_for_token(self, token: str) -> AuthUser | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                f"SELECT id, email, created_at FROM {USER_TABLE} WHERE token = ?",
-                (token,),
-            ).fetchone()
-
-        return AuthUser(id=row[0], email=row[1], createdAt=row[2]) if row else None
-
-    def get_settings(self) -> AppSettingsResponse:
-        stored = self._get_raw_settings()
-        return _settings_response(stored)
-
-    def update_settings(self, payload: AppSettingsUpdate) -> AppSettingsResponse:
-        current = self._get_raw_settings()
-        raw_settings = _merge_settings(current, payload)
-        now = _now_iso()
-        with self._connect() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO {SETTINGS_TABLE} (id, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """,
-                (SETTINGS_ID, _json_dumps(raw_settings), now, now),
-            )
-        return _settings_response(raw_settings)
-
-    def _init_schema(self) -> None:
-        with self._connect() as connection:
-            for table in ENTITY_TABLES:
-                connection.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {table} (
-                        id TEXT PRIMARY KEY,
-                        sort_order INTEGER NOT NULL,
-                        payload TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                    """
-                )
-            connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {USER_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    email TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    token TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {SETTINGS_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    payload TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {STRATEGY_GENERATION_CACHE_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    payload TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {MARKET_KLINE_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    period TEXT NOT NULL,
-                    open_time TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_market_klines_lookup ON {MARKET_KLINE_TABLE} (symbol, period, open_time)"
-            )
-            connection.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {NEW_COIN_LISTINGS_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    sort_order INTEGER NOT NULL,
-                    payload TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-
-    def _is_empty(self) -> bool:
-        with self._connect() as connection:
-            row = connection.execute("SELECT COUNT(*) FROM strategies").fetchone()
-        return int(row[0]) == 0
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
-
-    def _insert_many(self, connection: sqlite3.Connection, table: str, items: list[BaseModel]) -> None:
-        now = _now_iso()
-        connection.executemany(
-            f"""
-            INSERT INTO {table} (id, sort_order, payload, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (getattr(item, "id"), index, item.model_dump_json(), now, now)
-                for index, item in enumerate(items)
-            ],
-        )
-
-    def _list(self, table: str, model: type[ModelT]) -> list[ModelT]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT payload FROM {table} ORDER BY sort_order ASC, created_at ASC"
-            ).fetchall()
-
-        return [model.model_validate_json(row[0]) for row in rows]
-
-    def _get(self, table: str, item_id: str, model: type[ModelT]) -> ModelT | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                f"SELECT payload FROM {table} WHERE id = ?",
-                (item_id,),
-            ).fetchone()
-
-        return model.model_validate_json(row[0]) if row else None
-
-    def _upsert(self, table: str, item: BaseModel, sort_order: int) -> None:
-        now = _now_iso()
-        item_id = getattr(item, "id")
-        with self._connect() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO {table} (id, sort_order, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    sort_order = excluded.sort_order,
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """,
-                (item_id, sort_order, item.model_dump_json(), now, now),
-            )
-
-    def _delete(self, table: str, item_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
-
-    def _next_front_order(self, table: str) -> int:
-        with self._connect() as connection:
-            row = connection.execute(f"SELECT MIN(sort_order) FROM {table}").fetchone()
-
-        current = row[0]
-        return -1 if current is None else int(current) - 1
-
-    def _order_for_id(self, table: str, item_id: str) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
-                f"SELECT sort_order FROM {table} WHERE id = ?",
-                (item_id,),
-            ).fetchone()
-
-        return int(row[0]) if row else self._next_front_order(table)
-
-    def _market_data_for_symbol(self, symbol: str) -> tuple[float, float]:
-        normalized_symbol = symbol.upper()
-        latest_signal = max(
-            (signal for signal in self.signals if signal.symbol.upper() == normalized_symbol),
-            key=lambda signal: signal.triggeredAt,
-            default=None,
-        )
-        existing_watch_item = next(
-            (item for item in self.watchlist if item.symbol.upper() == normalized_symbol),
-            None,
-        )
-
-        current_price = latest_signal.price if latest_signal else None
-        change_24h = _change_from_candles(latest_signal.candles) if latest_signal else None
-
-        if existing_watch_item:
-            if current_price is None:
-                current_price = existing_watch_item.currentPrice
-            if change_24h is None:
-                change_24h = existing_watch_item.change24h
-
-        return current_price or 0, change_24h or 0
-
-    def _get_raw_settings(self) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute(
-                f"SELECT payload FROM {SETTINGS_TABLE} WHERE id = ?",
-                (SETTINGS_ID,),
-            ).fetchone()
-
-        return _json_loads(row[0]) if row else {}
-
-    def _get_strategy_generation_cache(self, cache_key: str) -> GeneratedStrategy | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                f"SELECT payload FROM {STRATEGY_GENERATION_CACHE_TABLE} WHERE id = ?",
-                (cache_key,),
-            ).fetchone()
-
-        return GeneratedStrategy.model_validate_json(row[0]) if row else None
-
-    def _upsert_strategy_generation_cache(self, cache_key: str, generated: GeneratedStrategy) -> None:
-        now = _now_iso()
-        payload = generated.model_copy(update={"generationCached": False}).model_dump_json()
-        with self._connect() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO {STRATEGY_GENERATION_CACHE_TABLE} (id, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """,
-                (cache_key, payload, now, now),
-            )
-
-    def upsert_market_candles(self, symbol: str, period: str, candles: list[Candle]) -> None:
-        if not candles:
-            return
-        normalized_symbol = symbol.upper()
-        normalized_period = str(period).upper()
-        now = _now_iso()
-        rows = []
-        for candle in candles:
-            item_id = _market_kline_id(normalized_symbol, normalized_period, candle.time)
-            rows.append(
-                (
-                    item_id,
-                    normalized_symbol,
-                    normalized_period,
-                    candle.time,
-                    MarketKline(
-                        id=item_id,
-                        symbol=normalized_symbol,
-                        period=normalized_period,  # type: ignore[arg-type]
-                        openTime=candle.time,
-                        candle=candle,
-                        createdAt=now,
-                        updatedAt=now,
-                    ).model_dump_json(),
-                    now,
-                    now,
-                )
-            )
-        with self._connect() as connection:
-            connection.executemany(
-                f"""
-                INSERT INTO {MARKET_KLINE_TABLE} (id, symbol, period, open_time, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """,
-                rows,
-            )
-            _prune_market_klines_sqlite(connection)
-
-    def market_candles_for_signal(self, signal: Signal, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT payload FROM {MARKET_KLINE_TABLE}
-                WHERE symbol = ? AND period = ? AND open_time <= ?
-                ORDER BY open_time DESC
-                LIMIT ?
-                """,
-                (signal.symbol.upper(), signal.period, signal.triggeredAt, limit),
-            ).fetchall()
-
-        candles = [MarketKline.model_validate_json(row[0]).candle for row in reversed(rows)]
-        return candles or signal.candles
 
 
 class MySQLStore:
@@ -634,6 +216,7 @@ class MySQLStore:
             for table in ENTITY_TABLES:
                 cursor.execute(f"DELETE FROM {table}")
             cursor.execute(f"DELETE FROM `{MARKET_KLINE_TABLE}`")
+            cursor.execute(f"DELETE FROM `{MARKET_KLINE_COVERAGE_TABLE}`")
             cursor.execute(f"DELETE FROM `{USER_TABLE}`")
             cursor.execute(f"DELETE FROM `{SETTINGS_TABLE}`")
             cursor.execute(f"DELETE FROM `{STRATEGY_GENERATION_CACHE_TABLE}`")
@@ -659,6 +242,17 @@ class MySQLStore:
     @property
     def new_coin_listings(self) -> list[NewCoinListing]:
         return self._list(NEW_COIN_LISTINGS_TABLE, NewCoinListing)
+
+    @property
+    def market_kline_backfill_tasks(self) -> list[MarketKlineBackfillTask]:
+        return self._list("market_kline_backfill_tasks", MarketKlineBackfillTask)
+
+    def market_kline_coverage_snapshot(self) -> list[MarketKlineCoverage]:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(f"SELECT payload FROM `{MARKET_KLINE_COVERAGE_TABLE}`")
+            rows = cursor.fetchall()
+        return [MarketKlineCoverage.model_validate_json(_payload_text(row[0])) for row in rows]
 
     def generate_strategy(self, period: str, conditions: list[str], force_refresh: bool = False) -> GeneratedStrategy:
         cache_key = _strategy_generation_cache_key(period, conditions)
@@ -775,6 +369,22 @@ class MySQLStore:
 
     def save_strategy_scan_history(self, item: StrategyScanHistory) -> None:
         self._upsert("strategy_scan_history", item, self._next_front_order("strategy_scan_history"))
+
+    def delete_old_signals(self, now: datetime | None = None, retention_days: int = 30) -> int:
+        cutoff = _as_utc(now or datetime.now(timezone.utc)) - timedelta(days=retention_days)
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute("SELECT id, payload, created_at FROM `signals`")
+            rows = cursor.fetchall()
+            old_signal_ids = [
+                row[0]
+                for row in rows
+                if _signal_row_is_older_than_cutoff(_payload_text(row[1]), row[2], cutoff)
+            ]
+            if old_signal_ids:
+                cursor.executemany("DELETE FROM `signals` WHERE id = %s", [(signal_id,) for signal_id in old_signal_ids])
+                connection.commit()
+        return len(old_signal_ids)
 
     def create_watch_item(self, payload: CreateWatchItemRequest) -> WatchItem:
         current_price, change_24h = self._market_data_for_symbol(payload.symbol)
@@ -938,6 +548,27 @@ class MySQLStore:
                     updated_at VARCHAR(40) NOT NULL,
                     INDEX idx_market_klines_lookup (symbol, period, open_time),
                     INDEX idx_market_klines_open_time (open_time)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            _ensure_mysql_index(
+                cursor,
+                MARKET_KLINE_TABLE,
+                "idx_market_klines_period_open_time",
+                f"CREATE INDEX idx_market_klines_period_open_time ON `{MARKET_KLINE_TABLE}` (period, open_time)",
+            )
+            _ensure_mysql_index(
+                cursor,
+                MARKET_KLINE_TABLE,
+                "idx_market_klines_period_symbol",
+                f"CREATE INDEX idx_market_klines_period_symbol ON `{MARKET_KLINE_TABLE}` (period, symbol)",
+            )
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS `{MARKET_KLINE_COVERAGE_TABLE}` (
+                    period VARCHAR(8) PRIMARY KEY,
+                    payload JSON NOT NULL,
+                    updated_at VARCHAR(40) NOT NULL
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """
             )
@@ -1110,6 +741,23 @@ class MySQLStore:
         normalized_symbol = symbol.upper()
         normalized_period = str(period).upper()
         now = _now_iso()
+        ids = [_market_kline_id(normalized_symbol, normalized_period, candle.time) for candle in candles]
+        existing_ids: set[str] = set()
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT 1 FROM `{MARKET_KLINE_TABLE}`
+                WHERE symbol = %s AND period = %s
+                LIMIT 1
+                """,
+                (normalized_symbol, normalized_period),
+            )
+            symbol_exists = cursor.fetchone() is not None
+            for chunk in _chunks(ids, 500):
+                placeholders = ",".join(["%s"] * len(chunk))
+                cursor.execute(f"SELECT id FROM `{MARKET_KLINE_TABLE}` WHERE id IN ({placeholders})", tuple(chunk))
+                existing_ids.update(str(row[0]) for row in cursor.fetchall())
         rows = []
         for candle in candles:
             item_id = _market_kline_id(normalized_symbol, normalized_period, candle.time)
@@ -1144,8 +792,375 @@ class MySQLStore:
                 """,
                 rows,
             )
-            _prune_market_klines_mysql(cursor)
             connection.commit()
+        self._apply_market_kline_coverage_delta(
+            normalized_period,
+            len(set(ids) - existing_ids),
+            0 if symbol_exists else 1,
+            [candle.time for candle in candles],
+        )
+        if normalized_period == "5M":
+            self._refresh_derived_market_klines(normalized_symbol, candles)
+
+    def _refresh_derived_market_klines(self, symbol: str, source_candles: list[Candle]) -> None:
+        source_times = [_parse_datetime(candle.time) for candle in source_candles]
+        parsed_times = [_as_utc(value) for value in source_times if value is not None]
+        if not parsed_times:
+            return
+
+        window_start = _floor_datetime_to_period(min(parsed_times), "4H")
+        window_end = _floor_datetime_to_period(max(parsed_times), "4H") + timedelta(seconds=_period_seconds("4H"))
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT payload FROM `{MARKET_KLINE_TABLE}`
+                WHERE symbol = %s AND period = %s AND open_time >= %s AND open_time < %s
+                ORDER BY open_time ASC
+                """,
+                (symbol.upper(), "5M", window_start.isoformat(), window_end.isoformat()),
+            )
+            rows = cursor.fetchall()
+
+        five_minute_candles = [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in rows]
+        for derived_period in MARKET_KLINE_DERIVED_PERIODS:
+            derived_candles = _aggregate_market_candles(five_minute_candles, derived_period)
+            if derived_candles:
+                self.upsert_market_candles(symbol, derived_period, derived_candles)
+
+    def refresh_market_kline_coverage_snapshot(
+        self, period: str, now: datetime | None = None
+    ) -> MarketKlineCoverage:
+        snapshot = self._scan_market_kline_coverage(str(period).upper(), now)
+        self._upsert_market_kline_coverage_snapshot(snapshot)
+        return snapshot
+
+    def _scan_market_kline_coverage(self, period: str, now: datetime | None = None) -> MarketKlineCoverage:
+        normalized_period = str(period).upper()
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT COUNT(*) AS rows_count, COUNT(DISTINCT symbol) AS symbols_count,
+                       MIN(open_time) AS earliest_open, MAX(open_time) AS latest_open
+                FROM `{MARKET_KLINE_TABLE}`
+                WHERE period = %s
+                """,
+                (normalized_period,),
+            )
+            row = cursor.fetchone()
+        rows_count, symbols_count, earliest_open, latest_open = row if row else (0, 0, None, None)
+        row_count = int(rows_count or 0)
+        return MarketKlineCoverage(
+            period=normalized_period,  # type: ignore[arg-type]
+            rows=row_count,
+            symbols=int(symbols_count or 0),
+            targetWindow=_market_kline_target_window_label(normalized_period),
+            earliestOpenTime=str(earliest_open) if earliest_open else _market_kline_retention_cutoffs(now).get(normalized_period),
+            latestOpenTime=str(latest_open) if latest_open else None,
+            status="normal" if row_count > 0 else "empty",
+            statusLabel="正常" if row_count > 0 else "暂无数据",
+        )
+
+    def _upsert_market_kline_coverage_snapshot(self, snapshot: MarketKlineCoverage) -> None:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                INSERT INTO `{MARKET_KLINE_COVERAGE_TABLE}` (period, payload, updated_at)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    payload = VALUES(payload),
+                    updated_at = VALUES(updated_at)
+                """,
+                (snapshot.period, snapshot.model_dump_json(), _now_iso()),
+            )
+            connection.commit()
+
+    def _apply_market_kline_coverage_delta(
+        self,
+        period: str,
+        rows_delta: int,
+        symbols_delta: int,
+        open_times: list[str],
+    ) -> None:
+        normalized_period = str(period).upper()
+        existing = {item.period: item for item in self.market_kline_coverage_snapshot()}.get(normalized_period)
+        parsed_times = []
+        for item in open_times:
+            parsed = _parse_datetime(item)
+            if parsed is not None:
+                parsed_times.append(_as_utc(parsed))
+        earliest = min(parsed_times).isoformat() if parsed_times else existing.earliestOpenTime if existing else None
+        latest = max(parsed_times).isoformat() if parsed_times else existing.latestOpenTime if existing else None
+        if existing:
+            if existing.earliestOpenTime and earliest:
+                existing_earliest = _as_utc(_parse_datetime(existing.earliestOpenTime))
+                new_earliest = _as_utc(_parse_datetime(earliest))
+                if existing_earliest is not None and new_earliest is not None:
+                    earliest = min(existing_earliest, new_earliest).isoformat()
+            if existing.latestOpenTime and latest:
+                existing_latest = _as_utc(_parse_datetime(existing.latestOpenTime))
+                new_latest = _as_utc(_parse_datetime(latest))
+                if existing_latest is not None and new_latest is not None:
+                    latest = max(existing_latest, new_latest).isoformat()
+        row_count = max(0, (existing.rows if existing else 0) + max(0, rows_delta))
+        symbol_count = max(0, (existing.symbols if existing else 0) + max(0, symbols_delta))
+        snapshot = MarketKlineCoverage(
+            period=normalized_period,  # type: ignore[arg-type]
+            rows=row_count,
+            symbols=symbol_count,
+            targetWindow=_market_kline_target_window_label(normalized_period),
+            earliestOpenTime=earliest,
+            latestOpenTime=latest,
+            status="normal" if row_count > 0 else "empty",
+            statusLabel="正常" if row_count > 0 else "暂无数据",
+        )
+        self._upsert_market_kline_coverage_snapshot(snapshot)
+
+    def delete_old_market_klines(
+        self,
+        now: datetime | None = None,
+        batch_size: int = MARKET_KLINE_CLEANUP_BATCH_SIZE,
+    ) -> dict[str, int]:
+        limit = max(1, int(batch_size))
+        deleted: dict[str, int] = {}
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            for period, cutoff in _market_kline_retention_cutoffs(now).items():
+                cursor.execute(
+                    f"""
+                    DELETE FROM `{MARKET_KLINE_TABLE}`
+                    WHERE period = %s AND open_time < %s
+                    ORDER BY open_time ASC
+                    LIMIT %s
+                    """,
+                    (period, cutoff, limit),
+                )
+                deleted[period] = int(cursor.rowcount or 0)
+            connection.commit()
+        for period, deleted_count in deleted.items():
+            if deleted_count > 0:
+                self.refresh_market_kline_coverage_snapshot(period, now)
+        return deleted
+
+    def latest_market_candles(self, symbol: str, period: str, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT payload FROM `{MARKET_KLINE_TABLE}`
+                WHERE symbol = %s AND period = %s
+                ORDER BY open_time DESC
+                LIMIT %s
+                """,
+                (symbol.upper(), str(period).upper(), limit),
+            )
+            rows = cursor.fetchall()
+
+        return [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in reversed(rows)]
+
+    def market_candles_for_symbol_period(self, symbol: str, period: str) -> list[Candle]:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT payload FROM `{MARKET_KLINE_TABLE}`
+                WHERE symbol = %s AND period = %s
+                ORDER BY open_time ASC
+                """,
+                (symbol.upper(), str(period).upper()),
+            )
+            rows = cursor.fetchall()
+
+        return [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in rows]
+
+    def market_kline_status(self) -> MarketKlineStatusResponse:
+        now = datetime.now(timezone.utc)
+        updated_at = _now_iso()
+        tasks = self.market_kline_backfill_tasks
+        status_counts = Counter(task.status for task in tasks)
+        total_tasks = len(tasks)
+        completed_tasks = status_counts.get("completed", 0)
+        failed_tasks = status_counts.get("failed", 0)
+        running_tasks_count = status_counts.get("running", 0)
+        pending_tasks = status_counts.get("pending", 0)
+        progress_percent = round((completed_tasks / total_tasks) * 100, 1) if total_tasks else 100.0
+        stored_total = sum(task.storedCandles for task in tasks)
+
+        with _market_kline_backfill_lock:
+            backfill_state = dict(_market_kline_backfill_state)
+        with _market_kline_collection_lock:
+            collection_state = dict(_market_kline_collection_state)
+        with _market_kline_cleanup_lock:
+            cleanup_state = dict(_market_kline_cleanup_state)
+
+        period_progress = _market_kline_period_progress(tasks)
+        coverage = self._market_kline_coverage(now)
+        running_tasks = [
+            MarketKlineRunningTask(
+                symbol=task.symbol,
+                period=task.period,
+                pagesFetched=task.pagesFetched,
+                storedCandles=task.storedCandles,
+                nextStart=task.nextStart,
+                targetEnd=task.targetEnd,
+                updatedAt=task.updatedAt,
+                lastError=task.lastError,
+            )
+            for task in sorted(
+                [task for task in tasks if task.status == "running"],
+                key=lambda item: (item.updatedAt, item.symbol, item.period),
+                reverse=True,
+            )[:8]
+        ]
+        recent_tasks = _market_kline_recent_tasks(tasks, collection_state, cleanup_state)
+        risks = _market_kline_status_risks(failed_tasks, pending_tasks, running_tasks_count, collection_state, cleanup_state)
+
+        backfill_running = bool(backfill_state.get("backfilling")) or running_tasks_count > 0 or pending_tasks > 0
+        collection_running = bool(collection_state.get("collecting"))
+        cleanup_running = bool(cleanup_state.get("cleaning"))
+        if failed_tasks:
+            overall_status: Literal["running", "waiting", "completed", "warning"] = "warning"
+            overall_label = "有异常"
+        elif cleanup_running or collection_running or backfill_running:
+            overall_status = "running"
+            overall_label = "运行中"
+        elif total_tasks and completed_tasks == total_tasks:
+            overall_status = "completed"
+            overall_label = "已完成"
+        else:
+            overall_status = "waiting"
+            overall_label = "等待中"
+
+        if cleanup_running:
+            active_phase = "数据清理"
+        elif collection_running:
+            active_phase = "增量更新"
+        elif backfill_running:
+            active_phase = "历史补齐"
+        else:
+            active_phase = "空闲"
+
+        cards = [
+            MarketKlineTaskCard(
+                name="K线历史补齐",
+                status="warning" if failed_tasks else ("running" if backfill_running else "completed"),
+                statusLabel="有异常" if failed_tasks else ("运行中" if backfill_running else "已完成"),
+                phase="历史窗口补齐",
+                progressCurrent=completed_tasks,
+                progressTotal=total_tasks,
+                progressPercent=progress_percent,
+                primaryMetric=f"已写入 {stored_total:,} 根",
+                secondaryMetric=f"当前 {running_tasks_count} 个任务 / 失败 {failed_tasks}",
+                lastRunAt=backfill_state.get("lastTriggeredAt"),
+                lastError=str(backfill_state.get("lastError") or ""),
+            ),
+            MarketKlineTaskCard(
+                name="K线增量更新",
+                status="running" if collection_running else ("warning" if collection_state.get("lastError") else "completed"),
+                statusLabel="运行中" if collection_running else ("有异常" if collection_state.get("lastError") else "最近完成"),
+                phase="周期追新",
+                primaryMetric=f"写入 {int(collection_state.get('lastStoredCandles') or 0):,} 根",
+                secondaryMetric=f"跳过 {int(collection_state.get('lastSkippedPairs') or 0):,} 个组合",
+                lastRunAt=collection_state.get("lastTriggeredAt"),
+                lastError=str(collection_state.get("lastError") or ""),
+            ),
+            MarketKlineTaskCard(
+                name="K线数据清理",
+                status="running" if cleanup_running else ("warning" if cleanup_state.get("lastError") else "waiting"),
+                statusLabel="清理中" if cleanup_running else ("有异常" if cleanup_state.get("lastError") else "等待中"),
+                phase="保留窗口清理",
+                primaryMetric=f"删除 {int(cleanup_state.get('lastDeletedCandles') or 0):,} 根",
+                secondaryMetric=f"最近日期 {cleanup_state.get('lastCleanupDate') or '--'}",
+                lastRunAt=cleanup_state.get("lastTriggeredAt"),
+                lastError=str(cleanup_state.get("lastError") or ""),
+            ),
+        ]
+
+        return MarketKlineStatusResponse(
+            updatedAt=updated_at,
+            overallStatus=overall_status,
+            overallStatusLabel=overall_label,
+            activePhase=active_phase,
+            cards=cards,
+            periodProgress=period_progress,
+            coverage=coverage,
+            runningTasks=running_tasks,
+            recentTasks=recent_tasks,
+            risks=risks,
+        )
+
+    def _market_kline_coverage(self, now: datetime) -> list[MarketKlineCoverage]:
+        snapshots = {item.period: item for item in self.market_kline_coverage_snapshot()}
+        cutoffs = _market_kline_retention_cutoffs(now)
+        coverage: list[MarketKlineCoverage] = []
+        for period in MARKET_KLINE_COLLECTION_PERIODS:
+            item = snapshots.get(period)
+            if item is not None:
+                coverage.append(item.model_copy(update={"targetWindow": _market_kline_target_window_label(period)}))
+                continue
+            coverage.append(
+                MarketKlineCoverage(
+                    period=period,  # type: ignore[arg-type]
+                    rows=0,
+                    symbols=0,
+                    targetWindow=_market_kline_target_window_label(period),
+                    earliestOpenTime=cutoffs.get(period),
+                    latestOpenTime=None,
+                    status="empty",
+                    statusLabel="暂无快照",
+                )
+            )
+        return coverage
+
+    def market_radar(self) -> MarketRadarResponse:
+        snapshots = self._market_radar_snapshots("1H", limit=40)
+        return _build_market_radar(snapshots)
+
+    def _market_radar_snapshots(self, period: str, limit: int = 40) -> dict[str, list[Candle]]:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT symbol, payload FROM (
+                    SELECT
+                        symbol,
+                        payload,
+                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY open_time DESC) AS row_num
+                    FROM `{MARKET_KLINE_TABLE}`
+                    WHERE period = %s
+                ) ranked
+                WHERE row_num <= %s
+                ORDER BY symbol ASC, row_num DESC
+                """,
+                (str(period).upper(), limit),
+            )
+            rows = cursor.fetchall()
+
+        snapshots: dict[str, list[Candle]] = {}
+        for symbol, payload in rows:
+            snapshots.setdefault(str(symbol).upper(), []).append(MarketKline.model_validate_json(_payload_text(payload)).candle)
+        return {symbol: candles for symbol, candles in snapshots.items() if len(candles) >= 20}
+
+    def upsert_market_kline_backfill_task(self, task: MarketKlineBackfillTask) -> None:
+        self._upsert("market_kline_backfill_tasks", task, self._order_for_id("market_kline_backfill_tasks", task.id))
+
+    def market_kline_time_range(self, symbol: str, period: str) -> tuple[datetime | None, datetime | None]:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT MIN(open_time), MAX(open_time)
+                FROM `{MARKET_KLINE_TABLE}`
+                WHERE symbol = %s AND period = %s
+                """,
+                (symbol.upper(), str(period).upper()),
+            )
+            row = cursor.fetchone()
+        earliest = _parse_datetime(str(row[0])) if row and row[0] else None
+        latest = _parse_datetime(str(row[1])) if row and row[1] else None
+        return earliest, latest
 
     def market_candles_for_signal(self, signal: Signal, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]:
         with self._connect() as connection:
@@ -1164,6 +1179,40 @@ class MySQLStore:
         candles = [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in reversed(rows)]
         return candles or signal.candles
 
+    def market_candles_after_signal(self, signal: Signal, period: str = "1H", limit: int = 48) -> list[Candle]:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                SELECT payload FROM `{MARKET_KLINE_TABLE}`
+                WHERE symbol = %s AND period = %s AND open_time > %s
+                ORDER BY open_time ASC
+                LIMIT %s
+                """,
+                (signal.symbol.upper(), str(period).upper(), signal.triggeredAt, limit),
+            )
+            rows = cursor.fetchall()
+
+        return [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in rows]
+
+    def performance_for_signal(self, signal_id: str) -> SignalPerformance | None:
+        return self._get("signal_performance", _signal_performance_id(signal_id), SignalPerformance)
+
+    def upsert_signal_performance(self, performance: SignalPerformance) -> None:
+        self._upsert("signal_performance", performance, self._order_for_id("signal_performance", performance.id))
+
+    def lessons_for_strategy(self, strategy_id: str, limit: int = 10) -> list[StrategyLesson]:
+        lessons = [
+            lesson
+            for lesson in self._list("strategy_lessons", StrategyLesson)
+            if lesson.strategyId == strategy_id
+        ]
+        return lessons[:limit]
+
+    def create_strategy_lesson(self, lesson: StrategyLesson) -> StrategyLesson:
+        self._upsert("strategy_lessons", lesson, self._next_front_order("strategy_lessons"))
+        return lesson
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1174,12 +1223,232 @@ def _market_kline_id(symbol: str, period: str, open_time: str) -> str:
     return f"mk-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:40]}"
 
 
-def _store_market_candles(store_instance: Any, symbol: str, period: str, candles: list[Candle]) -> None:
-    try:
-        store_instance.upsert_market_candles(symbol, period, candles)
-    except Exception:
-        # K-line cache should never interrupt strategy scanning.
-        return
+def _build_market_radar(snapshots: dict[str, list[Candle]]) -> MarketRadarResponse:
+    analyses = [
+        analysis
+        for symbol, candles in snapshots.items()
+        if (analysis := _analyze_market_radar_symbol(symbol, candles)) is not None
+    ]
+    if not analyses:
+        return MarketRadarResponse(
+            updatedAt=_now_iso(),
+            environment=MarketRadarEnvironment(
+                score=0,
+                status="avoid",
+                label="数据不足",
+                summary="当前数据库中可用于市场雷达分析的 K 线不足。",
+                notes=["等待 K 线补齐或增量采集完成后再查看市场雷达。"],
+            ),
+            metrics=MarketRadarMetrics(
+                symbolsAnalyzed=0,
+                risingRatio=0,
+                volumeExpansionRatio=0,
+                strongTrendRatio=0,
+                averageVolatility=0,
+                majorTrend="数据不足",
+            ),
+            opportunityGroups={"breakout": 0, "pullback": 0, "volume_start": 0, "watch": 0},
+            recommendations=[],
+        )
+
+    total = len(analyses)
+    rising_ratio = _round_pct(sum(1 for item in analyses if item["change_pct"] > 0) / total * 100)
+    volume_expansion_ratio = _round_pct(sum(1 for item in analyses if item["volume_ratio"] >= 1.25) / total * 100)
+    strong_trend_ratio = _round_pct(sum(1 for item in analyses if item["trend_score"] >= 65) / total * 100)
+    average_volatility = _round_pct(sum(item["volatility_pct"] for item in analyses) / total)
+    major_trend_score = _major_symbol_trend_score(analyses)
+    market_score = int(
+        max(
+            0,
+            min(
+                100,
+                rising_ratio * 0.32
+                + volume_expansion_ratio * 0.22
+                + strong_trend_ratio * 0.26
+                + major_trend_score * 0.2
+                - max(0, average_volatility - 8) * 2,
+            ),
+        )
+    )
+    if market_score >= 70:
+        status = "tradable"
+        label = "适合轻仓短线"
+    elif market_score >= 50:
+        status = "watch_only"
+        label = "只适合观察"
+    else:
+        status = "avoid"
+        label = "不适合主动短线"
+
+    notes = _market_radar_notes(status, rising_ratio, volume_expansion_ratio, average_volatility)
+    recommendations = [
+        _market_radar_recommendation(item)
+        for item in sorted(analyses, key=lambda row: row["score"], reverse=True)
+        if item["score"] >= 45
+    ][:12]
+    groups = {"breakout": 0, "pullback": 0, "volume_start": 0, "watch": 0}
+    for recommendation in recommendations:
+        groups[recommendation.category] = groups.get(recommendation.category, 0) + 1
+
+    return MarketRadarResponse(
+        updatedAt=_now_iso(),
+        environment=MarketRadarEnvironment(
+            score=market_score,
+            status=status,  # type: ignore[arg-type]
+            label=label,
+            summary=notes[0],
+            notes=notes,
+        ),
+        metrics=MarketRadarMetrics(
+            symbolsAnalyzed=total,
+            risingRatio=rising_ratio,
+            volumeExpansionRatio=volume_expansion_ratio,
+            strongTrendRatio=strong_trend_ratio,
+            averageVolatility=average_volatility,
+            majorTrend=_major_trend_label(major_trend_score),
+        ),
+        opportunityGroups=groups,
+        recommendations=recommendations,
+    )
+
+
+def _analyze_market_radar_symbol(symbol: str, candles: list[Candle]) -> dict[str, Any] | None:
+    ordered = sorted(candles, key=lambda candle: _parse_datetime(candle.time) or datetime.min.replace(tzinfo=timezone.utc))
+    if len(ordered) < 20:
+        return None
+    first = ordered[-20]
+    latest = ordered[-1]
+    if first.close <= 0 or latest.close <= 0:
+        return None
+    recent = ordered[-8:]
+    previous = ordered[-20:-8]
+    recent_volume = sum(candle.volume for candle in recent) / max(1, len(recent))
+    previous_volume = sum(candle.volume for candle in previous) / max(1, len(previous))
+    volume_ratio = recent_volume / previous_volume if previous_volume > 0 else 1
+    change_pct = (latest.close - first.close) / first.close * 100
+    recent_high = max(candle.high for candle in recent)
+    recent_low = min(candle.low for candle in recent)
+    volatility_pct = (recent_high - recent_low) / latest.close * 100
+    above_ma20 = latest.ma20 > 0 and latest.close >= latest.ma20
+    trend_score = max(0, min(100, change_pct * 8 + (20 if above_ma20 else 0) + min(volume_ratio, 2.5) * 18))
+    score = max(0, min(100, trend_score * 0.45 + min(volume_ratio, 2.5) * 26 + max(0, 20 - volatility_pct) * 0.7))
+    return {
+        "symbol": symbol,
+        "score": int(round(score)),
+        "trend_score": trend_score,
+        "change_pct": _round_pct(change_pct),
+        "volume_ratio": round(volume_ratio, 2),
+        "volatility_pct": _round_pct(volatility_pct),
+        "above_ma20": above_ma20,
+    }
+
+
+def _market_radar_recommendation(item: dict[str, Any]) -> MarketRadarRecommendation:
+    category = _market_radar_category(item)
+    risk_level = _market_radar_risk_level(item)
+    return MarketRadarRecommendation(
+        symbol=item["symbol"],
+        category=category,  # type: ignore[arg-type]
+        score=item["score"],
+        period="1H",
+        trend=_trend_label(item["trend_score"]),
+        volume=_volume_label(item["volume_ratio"]),
+        riskLevel=risk_level,  # type: ignore[arg-type]
+        changePct=item["change_pct"],
+        volumeRatio=item["volume_ratio"],
+        volatilityPct=item["volatility_pct"],
+        reason=_market_radar_reason(category, item),
+        riskNote=_market_radar_risk_note(risk_level, item),
+    )
+
+
+def _market_radar_category(item: dict[str, Any]) -> str:
+    if item["change_pct"] >= 8 and item["volume_ratio"] >= 1.25:
+        return "breakout"
+    if item["change_pct"] >= 3 and item["volume_ratio"] >= 1.4:
+        return "volume_start"
+    if item["change_pct"] >= 1 and item["volatility_pct"] <= 10:
+        return "pullback"
+    return "watch"
+
+
+def _market_radar_risk_level(item: dict[str, Any]) -> str:
+    if item["volatility_pct"] >= 16 or item["change_pct"] >= 18:
+        return "high"
+    if item["volatility_pct"] >= 9 or item["change_pct"] >= 10:
+        return "medium"
+    return "low"
+
+
+def _market_radar_reason(category: str, item: dict[str, Any]) -> str:
+    reasons = {
+        "breakout": "趋势延续并伴随量能放大，适合作为顺势突破观察。",
+        "volume_start": "近期量能明显抬升，价格开始脱离低位。",
+        "pullback": "趋势保持向上且波动可控，适合等待回踩确认。",
+        "watch": "强度尚可，但主动性不足，适合作为观察候选。",
+    }
+    return f"{reasons[category]} 近20根涨幅 {item['change_pct']}%，量能倍率 {item['volume_ratio']}。"
+
+
+def _market_radar_risk_note(risk_level: str, item: dict[str, Any]) -> str:
+    if risk_level == "high":
+        return "波动或涨幅偏高，避免追高，等待回踩后再评估。"
+    if risk_level == "medium":
+        return "短线波动正常但已有一定涨幅，需控制仓位。"
+    return "波动相对温和，仍需等待周期收线确认。"
+
+
+def _market_radar_notes(status: str, rising_ratio: float, volume_ratio: float, volatility: float) -> list[str]:
+    if status == "tradable":
+        first = "市场环境允许轻仓短线，优先关注顺势和放量确认。"
+    elif status == "watch_only":
+        first = "市场环境不够强，只适合观察强势币，不适合频繁出手。"
+    else:
+        first = "市场环境不适合主动短线，等待方向和量能重新确认。"
+    return [
+        first,
+        f"上涨交易对占比 {rising_ratio}%，放量交易对占比 {volume_ratio}%。",
+        f"平均短线波动 {volatility}%，波动过高时需要降低追单频率。",
+    ]
+
+
+def _major_symbol_trend_score(analyses: list[dict[str, Any]]) -> float:
+    majors = [item for item in analyses if item["symbol"] in {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}]
+    if not majors:
+        return 50
+    return sum(1 for item in majors if item["change_pct"] > 0) / len(majors) * 100
+
+
+def _major_trend_label(score: float) -> str:
+    if score >= 70:
+        return "主流币偏多"
+    if score >= 40:
+        return "主流币分化"
+    return "主流币偏弱"
+
+
+def _trend_label(score: float) -> str:
+    if score >= 75:
+        return "强"
+    if score >= 50:
+        return "稳"
+    return "弱"
+
+
+def _volume_label(ratio: float) -> str:
+    if ratio >= 1.5:
+        return "放量"
+    if ratio >= 1.15:
+        return "温和"
+    return "普通"
+
+
+def _round_pct(value: float) -> float:
+    return round(value, 2)
+
+
+def _signal_performance_id(signal_id: str) -> str:
+    return f"perf-{signal_id}"
 
 
 def _send_signal_pushover_if_configured(store_instance: Any, signal: Signal) -> str | None:
@@ -1549,21 +1818,40 @@ def _new_coin_status_label(status: str) -> str:
     return labels.get(status, status)
 
 
-def _market_kline_retention_cutoffs() -> dict[str, str]:
-    now = datetime.now(timezone.utc)
+def _market_kline_retention_cutoffs(now: datetime | None = None) -> dict[str, str]:
+    current = _as_utc(now or datetime.now(timezone.utc))
     return {
-        "1H": (now - timedelta(days=35)).isoformat(),
-        "4H": (now - timedelta(days=120)).isoformat(),
-        "1D": (now - timedelta(days=400)).isoformat(),
+        "5M": (current - timedelta(days=30)).isoformat(),
+        "15M": (current - timedelta(days=30)).isoformat(),
+        "1H": (current - timedelta(days=30)).isoformat(),
+        "4H": (current - timedelta(days=30)).isoformat(),
+        "1D": (current - timedelta(days=365)).isoformat(),
     }
 
 
-def _prune_market_klines_sqlite(connection: sqlite3.Connection) -> None:
-    for period, cutoff in _market_kline_retention_cutoffs().items():
-        connection.execute(
-            f"DELETE FROM {MARKET_KLINE_TABLE} WHERE period = ? AND open_time < ?",
-            (period, cutoff),
-        )
+def _market_kline_target_window_label(period: str) -> str:
+    return "365天" if str(period).upper() == "1D" else "30天"
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    return [items[index:index + size] for index in range(0, len(items), size)]
+
+
+def _ensure_mysql_index(cursor: Any, table: str, index_name: str, create_sql: str) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.statistics
+        WHERE table_schema = DATABASE()
+          AND table_name = %s
+          AND index_name = %s
+        """,
+        (table, index_name),
+    )
+    row = cursor.fetchone()
+    if not row or int(row[0] or 0) == 0:
+        cursor.execute(create_sql)
+
 
 
 def _prune_market_klines_mysql(cursor: Any) -> None:
@@ -1641,71 +1929,78 @@ def _run_strategies_once(store_instance: Any) -> StrategyRunResult:
     strategies_checked = 0
     symbols_checked = 0
     market_snapshots = _latest_signal_by_symbol_and_period(store_instance.signals)
+    strategies = [
+        strategy
+        for strategy in store_instance.strategies
+        if strategy.enabled and strategy.schedule.enabled and strategy.runtime.code.strip()
+    ]
+    strategy_created_counts: dict[str, int] = {strategy.id: 0 for strategy in strategies}
+    strategy_errors_by_id: dict[str, list[str]] = {strategy.id: [] for strategy in strategies}
 
-    for strategy in store_instance.strategies:
-        if not strategy.enabled or not strategy.schedule.enabled or not strategy.runtime.code.strip():
-            continue
-
-        strategies_checked += 1
-        strategy_created = 0
-        run_at = _now_iso()
-        strategy_errors: list[str] = []
-        symbol_blacklist = set(_normalize_symbol_blacklist(strategy.symbolBlacklist))
-
-        for symbol, source_signal in _scan_items_for_strategy(strategy.period, market_snapshots):
-            if symbol.upper() in symbol_blacklist:
-                continue
-            symbols_checked += 1
-            candles = source_signal.candles if source_signal is not None else []
+    for period, period_strategies in _strategies_by_period(strategies).items():
+        max_required_candles = max(_strategy_required_candle_count(strategy) for strategy in period_strategies)
+        for symbol, source_signal in _scan_items_for_strategy(period, market_snapshots):
+            cached_candles = store_instance.latest_market_candles(symbol, period, max_required_candles)
             price = source_signal.price if source_signal is not None else 0
-            try:
-                candles = fetch_market_candles(symbol, strategy.period)
-                _store_market_candles(store_instance, symbol, strategy.period, candles)
-                if len(candles) < CLOSED_KLINE_LIMIT:
+            if cached_candles:
+                price = cached_candles[-1].close
+
+            for strategy in period_strategies:
+                symbol_blacklist = set(_normalize_symbol_blacklist(strategy.symbolBlacklist))
+                if symbol.upper() in symbol_blacklist:
                     continue
-                if candles:
-                    price = candles[-1].close
-                matched = _execute_strategy_code(strategy.runtime.code, candles)
-            except Exception as exc:
-                message = f"{strategy.name} / {symbol}: {exc}"
-                errors.append(message)
-                strategy_errors.append(message)
-                continue
+                symbols_checked += 1
+                required_candles = _strategy_required_candle_count(strategy)
+                if len(cached_candles) < required_candles:
+                    continue
+                candles = cached_candles[-required_candles:]
+                try:
+                    matched = _execute_strategy_code(strategy.runtime.code, candles)
+                except Exception as exc:
+                    message = f"{strategy.name} / {symbol}: {exc}"
+                    errors.append(message)
+                    strategy_errors_by_id[strategy.id].append(message)
+                    continue
 
-            if not matched:
-                continue
+                if not matched:
+                    continue
 
-            signal = Signal(
-                id=f"sig-{uuid4().hex[:10]}",
-                symbol=symbol,
-                period=strategy.period,
-                strategyId=strategy.id,
-                strategyName=strategy.name,
-                signalType="trend",
-                score=strategy.score,
-                triggeredAt=run_at,
-                price=candles[-1].close if candles else price,
-                summary=f"{symbol} 命中策略：{strategy.name}",
-                analysis=strategy.runtime.aiAnalysis or strategy.conditions,
-                strengthGrade="A",
-                candles=candles,
-            )
-            _store_upsert_front(store_instance, "signals", signal)
-            push_error = _send_signal_pushover_if_configured(store_instance, signal)
-            if push_error:
-                message = f"{strategy.name} / {symbol}: Pushover push failed: {push_error}"
-                errors.append(message)
-                strategy_errors.append(message)
-            created_signals.append(signal)
-            strategy_created += 1
+                run_at = _now_iso()
+                signal = Signal(
+                    id=f"sig-{uuid4().hex[:10]}",
+                    symbol=symbol,
+                    period=strategy.period,
+                    strategyId=strategy.id,
+                    strategyName=strategy.name,
+                    signalType="trend",
+                    score=strategy.score,
+                    triggeredAt=run_at,
+                    price=candles[-1].close if candles else price,
+                    summary=f"{symbol} 命中策略：{strategy.name}",
+                    analysis=strategy.runtime.aiAnalysis or strategy.conditions,
+                    strengthGrade="A",
+                    candles=candles,
+                )
+                _store_upsert_front(store_instance, "signals", signal)
+                push_error = _send_signal_pushover_if_configured(store_instance, signal)
+                if push_error:
+                    message = f"{strategy.name} / {symbol}: Pushover push failed: {push_error}"
+                    errors.append(message)
+                    strategy_errors_by_id[strategy.id].append(message)
+                created_signals.append(signal)
+                strategy_created_counts[strategy.id] += 1
 
+    for strategy in strategies:
+        strategies_checked += 1
+        strategy_created = strategy_created_counts[strategy.id]
+        strategy_errors = strategy_errors_by_id[strategy.id]
         updated = strategy.model_copy(
             update={
                 "todaySignalCount": strategy.todaySignalCount + strategy_created,
-                "lastTriggeredAt": run_at if strategy_created else strategy.lastTriggeredAt,
+                "lastTriggeredAt": _now_iso() if strategy_created else strategy.lastTriggeredAt,
                 "schedule": strategy.schedule.model_copy(
                     update={
-                        "lastRunAt": run_at,
+                        "lastRunAt": _now_iso(),
                         "lastStatus": "error" if strategy_errors else "success",
                         "lastError": "\n".join(strategy_errors[:3]),
                     }
@@ -1721,6 +2016,13 @@ def _run_strategies_once(store_instance: Any) -> StrategyRunResult:
         errors=errors,
         createdSignals=created_signals,
     )
+
+
+def _strategies_by_period(strategies: list[Strategy]) -> dict[str, list[Strategy]]:
+    grouped: dict[str, list[Strategy]] = {}
+    for strategy in strategies:
+        grouped.setdefault(strategy.period, []).append(strategy)
+    return grouped
 
 
 def _latest_signal_by_symbol_and_period(signals: list[Signal]) -> dict[tuple[str, str], Signal]:
@@ -1741,6 +2043,41 @@ def _scan_items_for_strategy(
     if not symbols:
         symbols = sorted(symbol for (symbol, signal_period) in market_snapshots if signal_period == period)
     return [(symbol, market_snapshots.get((symbol, period))) for symbol in symbols]
+
+
+def _strategy_required_candle_count(strategy: Strategy) -> int:
+    candidates: list[int] = []
+    structured_conditions = strategy.runtime.structuredConditions if strategy.runtime else []
+    for condition in structured_conditions:
+        candidates.extend(_extract_candle_count_candidates(condition.title))
+        candidates.extend(_extract_candle_count_candidates(condition.description))
+        for parameter in condition.parameters:
+            candidates.extend(_extract_candle_count_candidates(parameter))
+    for condition in strategy.conditions:
+        candidates.extend(_extract_candle_count_candidates(condition))
+    if strategy.runtime and strategy.runtime.code:
+        candidates.extend(_extract_candle_count_candidates(strategy.runtime.code))
+    return max(1, max(candidates)) if candidates else CLOSED_KLINE_LIMIT
+
+
+def _extract_candle_count_candidates(text: str) -> list[int]:
+    if not text:
+        return []
+    candidates: list[int] = []
+    patterns = [
+        r"len\s*\(\s*candles\s*\)\s*[<>]=?\s*(\d+)",
+        r"candles\s*\[\s*-\s*(\d+)\s*:",
+        r"candles\s*\[\s*-\s*(\d+)\s*\]",
+        r"(?:根数|bars?|bar_count|kline_count)\s*[：:=]?\s*(\d+)",
+        r"(\d+)\s*(?:根|bars?)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                candidates.append(int(match.group(1)))
+            except (TypeError, ValueError):
+                continue
+    return candidates
 
 
 def fetch_tradable_symbols() -> list[str]:
@@ -1770,6 +2107,24 @@ def start_strategy_run_job(
     trigger_source: str = "manual",
 ) -> StrategyRunProgress:
     global _run_job_state
+    if _market_kline_collection_is_collecting() or _market_kline_backfill_is_backfilling() or _market_kline_cleanup_is_cleaning():
+        return _strategy_run_progress_from_state(
+            {
+                "jobId": "",
+                "running": False,
+                "triggerSource": trigger_source,
+                "errorsCount": 1,
+                "errors": [
+                    StrategyRunError(
+                        time=datetime.now().strftime("%H:%M:%S"),
+                        symbol="ALL",
+                        errorType="K线更新中",
+                        message="K线数据正在更新，请稍后再试",
+                        impact="本次扫描未启动",
+                    )
+                ],
+            }
+        )
     with _run_job_lock:
         if _run_job_state and _run_job_state.get("running"):
             return _strategy_run_progress_from_state(_run_job_state)
@@ -1841,88 +2196,92 @@ def _run_strategy_job_worker(store_instance: Any, strategies: list[Strategy]) ->
             symbols = sorted({symbol for (symbol, _period) in market_snapshots})
         _merge_run_state(totalSymbols=len(symbols) * len(strategies), pendingSymbols=len(symbols) * len(strategies))
 
+        strategy_created_counts: dict[str, int] = {strategy.id: 0 for strategy in strategies}
+        strategy_errors_by_id: dict[str, list[str]] = {strategy.id: [] for strategy in strategies}
         for strategy in strategies:
-            if _is_run_cancel_requested():
-                break
-            strategy_created = 0
-            strategy_errors: list[str] = []
-            run_at = _now_iso()
             _merge_run_state(
-                currentStrategyName=strategy.name,
-                currentPeriod=strategy.period,
                 strategiesChecked=(_run_job_state or {}).get("strategiesChecked", 0) + 1,
             )
 
-            symbol_blacklist = set(_normalize_symbol_blacklist(strategy.symbolBlacklist))
-
+        for period, period_strategies in _strategies_by_period(strategies).items():
+            if _is_run_cancel_requested():
+                break
+            max_required_candles = max(_strategy_required_candle_count(strategy) for strategy in period_strategies)
             for symbol in symbols:
                 if _is_run_cancel_requested():
                     break
-                _merge_run_state(currentSymbol=symbol)
-                if symbol.upper() in symbol_blacklist:
-                    _append_run_skip(symbol, "币种黑名单", f"{symbol} 已加入该策略黑名单，跳过本次扫描")
-                    _increment_scanned()
-                    continue
-                candles: list[Candle] = []
-                price = 0.0
+                _merge_run_state(currentPeriod=period, currentSymbol=symbol)
                 try:
-                    candles = fetch_market_candles(symbol, strategy.period)
-                    _store_market_candles(store_instance, symbol, strategy.period, candles)
-                    if len(candles) < CLOSED_KLINE_LIMIT:
-                        _append_run_skip(symbol, "K线不足", f"需要 {CLOSED_KLINE_LIMIT} 根完整K线，实际 {len(candles)} 根")
+                    cached_candles = store_instance.latest_market_candles(symbol, period, max_required_candles)
+                except Exception as exc:
+                    for strategy in period_strategies:
+                        _merge_run_state(currentStrategyName=strategy.name)
+                        _append_run_error(symbol, "数据获取失败", str(exc))
+                        strategy_errors_by_id[strategy.id].append(f"{strategy.name} / {symbol}: {exc}")
+                        _increment_scanned()
+                    continue
+
+                price = cached_candles[-1].close if cached_candles else 0.0
+                for strategy in period_strategies:
+                    _merge_run_state(currentStrategyName=strategy.name)
+                    symbol_blacklist = set(_normalize_symbol_blacklist(strategy.symbolBlacklist))
+                    if symbol.upper() in symbol_blacklist:
+                        _append_run_skip(symbol, "币种黑名单", f"{symbol} 已加入该策略黑名单，跳过本次扫描")
                         _increment_scanned()
                         continue
-                    if candles:
-                        price = candles[-1].close
-                except Exception as exc:
-                    _append_run_error(symbol, "数据获取失败", str(exc))
-                    strategy_errors.append(f"{strategy.name} / {symbol}: {exc}")
+                    required_candles = _strategy_required_candle_count(strategy)
+                    if len(cached_candles) < required_candles:
+                        _append_run_skip(symbol, "K线不足", f"需要 {required_candles} 根完整K线，实际 {len(cached_candles)} 根")
+                        _increment_scanned()
+                        continue
+                    candles = cached_candles[-required_candles:]
+
+                    try:
+                        matched = _execute_strategy_code(strategy.runtime.code, candles)
+                    except Exception as exc:
+                        _append_run_error(symbol, "计算异常", str(exc))
+                        strategy_errors_by_id[strategy.id].append(f"{strategy.name} / {symbol}: {exc}")
+                        _increment_scanned()
+                        continue
+
+                    if matched:
+                        signal = Signal(
+                            id=f"sig-{uuid4().hex[:10]}",
+                            symbol=symbol,
+                            period=strategy.period,
+                            strategyId=strategy.id,
+                            strategyName=strategy.name,
+                            signalType="strategy",
+                            score=strategy.score,
+                            triggeredAt=_now_iso(),
+                            price=candles[-1].close if candles else price,
+                            summary=f"{symbol} 命中策略：{strategy.name}",
+                            analysis=strategy.runtime.aiAnalysis or strategy.conditions,
+                            strengthGrade="A",
+                            candles=candles,
+                        )
+                        _store_upsert_front(store_instance, "signals", signal)
+                        push_error = _send_signal_pushover_if_configured(store_instance, signal)
+                        if push_error:
+                            _append_run_error(symbol, "Pushover推送失败", push_error)
+                            strategy_errors_by_id[strategy.id].append(f"{strategy.name} / {symbol}: Pushover push failed: {push_error}")
+                        strategy_created_counts[strategy.id] += 1
+                        with _run_job_lock:
+                            if _run_job_state is not None:
+                                _run_job_state["signalsCreated"] += 1
+                                _run_job_state["createdSignals"].append(signal)
                     _increment_scanned()
-                    continue
 
-                try:
-                    matched = _execute_strategy_code(strategy.runtime.code, candles)
-                except Exception as exc:
-                    _append_run_error(symbol, "计算异常", str(exc))
-                    strategy_errors.append(f"{strategy.name} / {symbol}: {exc}")
-                    _increment_scanned()
-                    continue
-
-                if matched:
-                    signal = Signal(
-                        id=f"sig-{uuid4().hex[:10]}",
-                        symbol=symbol,
-                        period=strategy.period,
-                        strategyId=strategy.id,
-                        strategyName=strategy.name,
-                        signalType="strategy",
-                        score=strategy.score,
-                        triggeredAt=run_at,
-                        price=candles[-1].close if candles else price,
-                        summary=f"{symbol} 命中策略：{strategy.name}",
-                        analysis=strategy.runtime.aiAnalysis or strategy.conditions,
-                        strengthGrade="A",
-                        candles=candles,
-                    )
-                    _store_upsert_front(store_instance, "signals", signal)
-                    push_error = _send_signal_pushover_if_configured(store_instance, signal)
-                    if push_error:
-                        _append_run_error(symbol, "Pushover推送失败", push_error)
-                        strategy_errors.append(f"{strategy.name} / {symbol}: Pushover push failed: {push_error}")
-                    strategy_created += 1
-                    with _run_job_lock:
-                        if _run_job_state is not None:
-                            _run_job_state["signalsCreated"] += 1
-                            _run_job_state["createdSignals"].append(signal)
-                _increment_scanned()
-
+        for strategy in strategies:
+            strategy_created = strategy_created_counts[strategy.id]
+            strategy_errors = strategy_errors_by_id[strategy.id]
             updated = strategy.model_copy(
                 update={
                     "todaySignalCount": strategy.todaySignalCount + strategy_created,
-                    "lastTriggeredAt": run_at if strategy_created else strategy.lastTriggeredAt,
+                    "lastTriggeredAt": _now_iso() if strategy_created else strategy.lastTriggeredAt,
                     "schedule": strategy.schedule.model_copy(
                         update={
-                            "lastRunAt": run_at,
+                            "lastRunAt": _now_iso(),
                             "lastStatus": "error" if strategy_errors else "success",
                             "lastError": "\n".join(strategy_errors[:3]),
                         }
@@ -2053,8 +2412,20 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _signal_row_is_older_than_cutoff(payload_text: str, created_at: str, cutoff: datetime) -> bool:
+    payload = _json_loads(_payload_text(payload_text))
+    signal_time = _parse_datetime(str(payload.get("triggeredAt") or ""))
+    if signal_time is None:
+        signal_time = _parse_datetime(str(created_at or ""))
+    return signal_time is not None and _as_utc(signal_time) < _as_utc(cutoff)
+
+
 def _latest_period_boundary(period: str, now: datetime) -> datetime:
     normalized = _as_utc(now).replace(second=0, microsecond=0)
+    if period == "5M":
+        return normalized.replace(minute=(normalized.minute // 5) * 5)
+    if period == "15M":
+        return normalized.replace(minute=(normalized.minute // 15) * 15)
     if period == "4H":
         return normalized.replace(hour=(normalized.hour // 4) * 4, minute=0)
     if period == "1D":
@@ -2102,7 +2473,13 @@ def run_strategy_scheduler_tick(store_instance: Any, now: datetime | None = None
         _scheduler_state["dueStrategies"] = len(due_strategies)
         _scheduler_state["lastError"] = ""
 
-    if run_busy or not due_strategies:
+    if (
+        run_busy
+        or not due_strategies
+        or _market_kline_collection_is_collecting()
+        or _market_kline_backfill_is_backfilling()
+        or _market_kline_cleanup_is_cleaning()
+    ):
         return 0
 
     start_strategy_run_job(store_instance, due_strategies, "scheduled")
@@ -2237,6 +2614,1105 @@ def _new_coin_scheduler_loop(store_instance: Any, check_interval_seconds: int, s
                 _new_coin_scheduler_state["lastError"] = str(exc)
 
 
+_signal_cleanup_scheduler_lock = threading.Lock()
+_signal_cleanup_scheduler_stop_event: threading.Event | None = None
+_signal_cleanup_scheduler_thread: threading.Thread | None = None
+_signal_cleanup_scheduler_state: dict[str, Any] = {
+    "running": False,
+    "checkIntervalSeconds": 3600,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastCleanupDate": None,
+    "lastDeleted": 0,
+    "lastError": "",
+}
+
+
+def run_signal_cleanup_scheduler_tick(
+    store_instance: Any,
+    now: datetime | None = None,
+    retention_days: int = 30,
+) -> int:
+    check_time = _as_utc(now or datetime.now(timezone.utc))
+    cleanup_date = check_time.date().isoformat()
+    with _signal_cleanup_scheduler_lock:
+        _signal_cleanup_scheduler_state["lastCheckedAt"] = _now_iso()
+        _signal_cleanup_scheduler_state["lastError"] = ""
+        if _signal_cleanup_scheduler_state.get("lastCleanupDate") == cleanup_date:
+            return 0
+
+    deleted = store_instance.delete_old_signals(check_time, retention_days=retention_days)
+    with _signal_cleanup_scheduler_lock:
+        _signal_cleanup_scheduler_state["lastTriggeredAt"] = _now_iso()
+        _signal_cleanup_scheduler_state["lastCleanupDate"] = cleanup_date
+        _signal_cleanup_scheduler_state["lastDeleted"] = deleted
+    return deleted
+
+
+def start_signal_cleanup_scheduler(store_instance: Any, check_interval_seconds: int = 3600) -> None:
+    global _signal_cleanup_scheduler_stop_event, _signal_cleanup_scheduler_thread
+    with _signal_cleanup_scheduler_lock:
+        if _signal_cleanup_scheduler_thread is not None and _signal_cleanup_scheduler_thread.is_alive():
+            return
+        _signal_cleanup_scheduler_stop_event = threading.Event()
+        _signal_cleanup_scheduler_state.update(
+            {
+                "running": True,
+                "checkIntervalSeconds": check_interval_seconds,
+                "lastError": "",
+            }
+        )
+        _signal_cleanup_scheduler_thread = threading.Thread(
+            target=_signal_cleanup_scheduler_loop,
+            args=(store_instance, check_interval_seconds, _signal_cleanup_scheduler_stop_event),
+            daemon=True,
+        )
+        _signal_cleanup_scheduler_thread.start()
+
+
+def stop_signal_cleanup_scheduler() -> None:
+    global _signal_cleanup_scheduler_stop_event, _signal_cleanup_scheduler_thread
+    with _signal_cleanup_scheduler_lock:
+        stop_event = _signal_cleanup_scheduler_stop_event
+        thread = _signal_cleanup_scheduler_thread
+        _signal_cleanup_scheduler_stop_event = None
+        _signal_cleanup_scheduler_thread = None
+        _signal_cleanup_scheduler_state["running"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _signal_cleanup_scheduler_loop(store_instance: Any, check_interval_seconds: int, stop_event: threading.Event) -> None:
+    while not stop_event.wait(check_interval_seconds):
+        try:
+            run_signal_cleanup_scheduler_tick(store_instance)
+        except Exception as exc:
+            with _signal_cleanup_scheduler_lock:
+                _signal_cleanup_scheduler_state["lastCheckedAt"] = _now_iso()
+                _signal_cleanup_scheduler_state["lastError"] = str(exc)
+
+
+_signal_performance_scheduler_lock = threading.Lock()
+_signal_performance_scheduler_stop_event: threading.Event | None = None
+_signal_performance_scheduler_thread: threading.Thread | None = None
+_signal_performance_scheduler_state: dict[str, Any] = {
+    "running": False,
+    "checkIntervalSeconds": 300,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastTracked": 0,
+    "lastReviewed": 0,
+    "lastLessonsCreated": 0,
+    "lastError": "",
+}
+
+
+def run_signal_performance_scheduler_tick(
+    store_instance: Any,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    check_time = _as_utc(now or datetime.now(timezone.utc))
+    with _signal_performance_scheduler_lock:
+        _signal_performance_scheduler_state["lastCheckedAt"] = _now_iso()
+        _signal_performance_scheduler_state["lastError"] = ""
+
+    if _market_kline_collection_is_collecting() or _market_kline_cleanup_is_cleaning():
+        return {"tracked": 0, "reviewed": 0, "lessonsCreated": 0, "skipped": "kline_busy", "errors": []}
+
+    tracked = 0
+    reviewed = 0
+    lessons_created = 0
+    errors: list[str] = []
+    raw_settings = store_instance._get_raw_settings() if hasattr(store_instance, "_get_raw_settings") else {}
+
+    for signal in store_instance.signals:
+        try:
+            performance = _calculate_signal_performance(store_instance, signal, check_time)
+            if performance is None:
+                continue
+            store_instance.upsert_signal_performance(performance)
+            tracked += 1
+            if performance.status == "completed" and performance.reviewStatus == "pending":
+                reviewed_performance, lesson = _generate_signal_review(store_instance, signal, performance, raw_settings)
+                store_instance.upsert_signal_performance(reviewed_performance)
+                reviewed += 1
+                if lesson is not None:
+                    store_instance.create_strategy_lesson(lesson)
+                    lessons_created += 1
+        except Exception as exc:
+            errors.append(f"{signal.id}: {exc}")
+
+    with _signal_performance_scheduler_lock:
+        _signal_performance_scheduler_state["lastTriggeredAt"] = _now_iso()
+        _signal_performance_scheduler_state["lastTracked"] = tracked
+        _signal_performance_scheduler_state["lastReviewed"] = reviewed
+        _signal_performance_scheduler_state["lastLessonsCreated"] = lessons_created
+        _signal_performance_scheduler_state["lastError"] = "\n".join(errors[:3])
+
+    return {"tracked": tracked, "reviewed": reviewed, "lessonsCreated": lessons_created, "errors": errors}
+
+
+def start_signal_performance_scheduler(store_instance: Any, check_interval_seconds: int = 300) -> None:
+    global _signal_performance_scheduler_stop_event, _signal_performance_scheduler_thread
+    with _signal_performance_scheduler_lock:
+        if _signal_performance_scheduler_thread is not None and _signal_performance_scheduler_thread.is_alive():
+            return
+        _signal_performance_scheduler_stop_event = threading.Event()
+        _signal_performance_scheduler_state.update(
+            {
+                "running": True,
+                "checkIntervalSeconds": check_interval_seconds,
+                "lastError": "",
+            }
+        )
+        _signal_performance_scheduler_thread = threading.Thread(
+            target=_signal_performance_scheduler_loop,
+            args=(store_instance, check_interval_seconds, _signal_performance_scheduler_stop_event),
+            daemon=True,
+        )
+        _signal_performance_scheduler_thread.start()
+
+
+def stop_signal_performance_scheduler() -> None:
+    global _signal_performance_scheduler_stop_event, _signal_performance_scheduler_thread
+    with _signal_performance_scheduler_lock:
+        stop_event = _signal_performance_scheduler_stop_event
+        thread = _signal_performance_scheduler_thread
+        _signal_performance_scheduler_stop_event = None
+        _signal_performance_scheduler_thread = None
+        _signal_performance_scheduler_state["running"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _signal_performance_scheduler_loop(store_instance: Any, check_interval_seconds: int, stop_event: threading.Event) -> None:
+    while not stop_event.wait(check_interval_seconds):
+        try:
+            run_signal_performance_scheduler_tick(store_instance)
+        except Exception as exc:
+            with _signal_performance_scheduler_lock:
+                _signal_performance_scheduler_state["lastCheckedAt"] = _now_iso()
+                _signal_performance_scheduler_state["lastError"] = str(exc)
+
+
+def _calculate_signal_performance(store_instance: Any, signal: Signal, now: datetime) -> SignalPerformance | None:
+    if signal.price <= 0:
+        return None
+    triggered_at = _parse_datetime(signal.triggeredAt)
+    if triggered_at is None:
+        return None
+    triggered_at_utc = _as_utc(triggered_at)
+    if _as_utc(now) <= triggered_at_utc:
+        return None
+
+    existing = store_instance.performance_for_signal(signal.id)
+    candles = store_instance.market_candles_after_signal(signal, "1H", 48)
+    now_iso = _now_iso()
+    base = existing or SignalPerformance(
+        id=_signal_performance_id(signal.id),
+        signalId=signal.id,
+        symbol=signal.symbol,
+        period=signal.period,
+        strategyId=signal.strategyId,
+        strategyName=signal.strategyName,
+        entryPrice=signal.price,
+        createdAt=now_iso,
+        updatedAt=now_iso,
+    )
+    if not candles:
+        return base.model_copy(update={"status": "tracking", "updatedAt": now_iso})
+
+    elapsed_hours = (_as_utc(now) - triggered_at_utc).total_seconds() / 3600
+    status = "completed" if elapsed_hours >= 24 and len(candles) >= 24 else "tracking"
+    window = candles[:24] if len(candles) >= 24 else candles
+    updates: dict[str, Any] = {
+        "status": status,
+        "bestPrice": max(candle.high for candle in window),
+        "worstPrice": min(candle.low for candle in window),
+        "evaluatedUntil": window[-1].time,
+        "updatedAt": now_iso,
+    }
+    updates["maxGainPct"] = _pct(updates["bestPrice"], signal.price)
+    updates["maxDrawdownPct"] = _pct(updates["worstPrice"], signal.price)
+    if len(candles) >= 1:
+        updates["change1hPct"] = _pct(candles[0].close, signal.price)
+    if len(candles) >= 4:
+        updates["change4hPct"] = _pct(candles[3].close, signal.price)
+    if len(candles) >= 24:
+        updates["change24hPct"] = _pct(candles[23].close, signal.price)
+    return base.model_copy(update=updates)
+
+
+def _pct(value: float, base: float) -> float:
+    return round((value - base) / base * 100, 6)
+
+
+def _generate_signal_review(
+    store_instance: Any,
+    signal: Signal,
+    performance: SignalPerformance,
+    raw_settings: dict[str, Any],
+) -> tuple[SignalPerformance, StrategyLesson | None]:
+    review_response = _call_llm_for_signal_review(signal, performance, store_instance.lessons_for_strategy(signal.strategyId), raw_settings)
+    if isinstance(review_response, tuple):
+        review_payload, error = review_response
+    else:
+        review_payload, error = review_response, ""
+    if review_payload is None:
+        return performance.model_copy(
+            update={
+                "reviewStatus": "failed",
+                "reviewSummary": error,
+                "reviewGeneratedAt": _now_iso(),
+                "reviewSource": "llm",
+                "updatedAt": _now_iso(),
+            }
+        ), None
+
+    result = _normalize_review_result(str(review_payload.get("result") or "weak"))
+    suggestions = [
+        str(item).strip()
+        for item in review_payload.get("improvementIdeas", [])
+        if str(item).strip()
+    ]
+    suggested_rule_changes = [
+        item
+        for item in review_payload.get("suggestedRuleChanges", [])
+        if isinstance(item, dict)
+    ]
+    now_iso = _now_iso()
+    updated_performance = performance.model_copy(
+        update={
+            "reviewStatus": "generated",
+            "reviewResult": result,
+            "reviewSummary": str(review_payload.get("summary") or ""),
+            "reviewAnalysis": str(review_payload.get("analysis") or ""),
+            "reviewSuggestions": suggestions,
+            "reviewGeneratedAt": now_iso,
+            "reviewSource": "llm",
+            "updatedAt": now_iso,
+        }
+    )
+    lesson = StrategyLesson(
+        id=f"lesson-{uuid4().hex[:10]}",
+        strategyId=signal.strategyId,
+        signalId=signal.id,
+        result=result,
+        failureReason=str(review_payload.get("failureReason") or ""),
+        effectivePattern=str(review_payload.get("effectivePattern") or ""),
+        improvementIdeas=suggestions,
+        suggestedRuleChanges=[
+            {str(key): str(value) for key, value in item.items()}
+            for item in suggested_rule_changes
+        ],
+        confidence=max(0, min(1, float(review_payload.get("confidence") or 0))),
+        createdAt=now_iso,
+    )
+    return updated_performance, lesson
+
+
+def _normalize_review_result(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"effective", "weak", "failed", "insufficient_data"}:
+        return normalized
+    return "weak"
+
+
+def _call_llm_for_signal_review(
+    signal: Signal,
+    performance: SignalPerformance,
+    lessons: list[StrategyLesson],
+    raw_settings: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    llm_settings = _llm_settings_from_raw(raw_settings)
+    prompt = _build_signal_review_prompt(signal, performance, lessons)
+    return _call_llm_for_strategy(prompt, llm_settings)
+
+
+def _build_signal_review_prompt(signal: Signal, performance: SignalPerformance, lessons: list[StrategyLesson]) -> str:
+    lesson_summary = [
+        {
+            "result": lesson.result,
+            "failureReason": lesson.failureReason,
+            "effectivePattern": lesson.effectivePattern,
+            "improvementIdeas": lesson.improvementIdeas,
+            "confidence": lesson.confidence,
+        }
+        for lesson in lessons[:8]
+    ]
+    payload = {
+        "signal": signal.model_dump(exclude={"candles", "performance"}),
+        "performance": performance.model_dump(exclude={"reviewAnalysis", "reviewSummary", "reviewSuggestions"}),
+        "recentStrategyLessons": lesson_summary,
+    }
+    return (
+        "你是量化策略复盘助手。请基于真实信号后续表现和同策略历史经验输出严格 JSON，"
+        "不要编造没有数据支持的结论。JSON 字段必须包含 result, summary, analysis, "
+        "failureReason, effectivePattern, improvementIdeas, suggestedRuleChanges, confidence。\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _market_kline_period_progress(tasks: list[MarketKlineBackfillTask]) -> list[MarketKlinePeriodProgress]:
+    progress: list[MarketKlinePeriodProgress] = []
+    for period in MARKET_KLINE_COLLECTION_PERIODS:
+        period_tasks = [task for task in tasks if task.period == period]
+        counts = Counter(task.status for task in period_tasks)
+        total = len(period_tasks)
+        completed = counts.get("completed", 0)
+        progress.append(
+            MarketKlinePeriodProgress(
+                period=period,  # type: ignore[arg-type]
+                total=total,
+                completed=completed,
+                running=counts.get("running", 0),
+                pending=counts.get("pending", 0),
+                failed=counts.get("failed", 0),
+                progressPercent=round((completed / total) * 100, 1) if total else 100.0,
+            )
+        )
+    return progress
+
+
+def _market_kline_recent_tasks(
+    tasks: list[MarketKlineBackfillTask],
+    collection_state: dict[str, Any],
+    cleanup_state: dict[str, Any],
+) -> list[MarketKlineRecentTask]:
+    recent: list[MarketKlineRecentTask] = []
+    for task in sorted(tasks, key=lambda item: (item.updatedAt, item.symbol, item.period), reverse=True):
+        if task.status not in {"completed", "failed"}:
+            continue
+        recent.append(
+            MarketKlineRecentTask(
+                type="backfill",
+                status="完成" if task.status == "completed" else "失败",
+                target=f"{task.symbol} {task.period}",
+                amount=f"{task.storedCandles:,} 根",
+                updatedAt=task.updatedAt,
+                note=task.lastError or ("已补齐窗口" if task.status == "completed" else "等待重试"),
+            )
+        )
+        if len(recent) >= 6:
+            break
+
+    if collection_state.get("lastTriggeredAt"):
+        recent.append(
+            MarketKlineRecentTask(
+                type="incremental",
+                status="完成" if not collection_state.get("lastError") else "异常",
+                target="增量更新",
+                amount=f"{int(collection_state.get('lastStoredCandles') or 0):,} 根",
+                updatedAt=collection_state.get("lastTriggeredAt"),
+                note=f"跳过 {int(collection_state.get('lastSkippedPairs') or 0):,} 个组合",
+            )
+        )
+    if cleanup_state.get("lastTriggeredAt") or cleanup_state.get("lastCleanupDate"):
+        recent.append(
+            MarketKlineRecentTask(
+                type="cleanup",
+                status="完成" if not cleanup_state.get("lastError") else "异常",
+                target="数据清理",
+                amount=f"删除 {int(cleanup_state.get('lastDeletedCandles') or 0):,} 根",
+                updatedAt=cleanup_state.get("lastTriggeredAt"),
+                note=f"清理日期 {cleanup_state.get('lastCleanupDate') or '--'}",
+            )
+        )
+    return recent[:8]
+
+
+def _market_kline_status_risks(
+    failed_tasks: int,
+    pending_tasks: int,
+    running_tasks: int,
+    collection_state: dict[str, Any],
+    cleanup_state: dict[str, Any],
+) -> list[str]:
+    risks: list[str] = []
+    if failed_tasks:
+        risks.append(f"失败任务 {failed_tasks} 个，需要查看错误原因并等待重试。")
+    if pending_tasks or running_tasks:
+        risks.append("历史补齐运行中，策略扫描可能等待 K 线写入窗口。")
+    if collection_state.get("lastError"):
+        risks.append(f"增量更新最近错误：{collection_state['lastError']}")
+    if cleanup_state.get("lastError"):
+        risks.append(f"数据清理最近错误：{cleanup_state['lastError']}")
+    if not risks:
+        risks.append("当前无明显异常。")
+    return risks
+
+
+_market_kline_coverage_snapshot_lock = threading.Lock()
+_market_kline_coverage_snapshot_stop_event: threading.Event | None = None
+_market_kline_coverage_snapshot_thread: threading.Thread | None = None
+_market_kline_coverage_snapshot_state: dict[str, Any] = {
+    "running": False,
+    "refreshing": False,
+    "checkIntervalSeconds": 300,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastRefreshedPeriod": None,
+    "lastError": "",
+}
+
+
+def run_market_kline_coverage_snapshot_scheduler_tick(
+    store_instance: Any,
+    check_time: datetime | None = None,
+) -> str | None:
+    now = check_time or datetime.now(timezone.utc)
+    with _market_kline_coverage_snapshot_lock:
+        if _market_kline_coverage_snapshot_state.get("refreshing"):
+            return None
+        _market_kline_coverage_snapshot_state["lastCheckedAt"] = _now_iso()
+        _market_kline_coverage_snapshot_state["lastError"] = ""
+
+    snapshots = {item.period for item in store_instance.market_kline_coverage_snapshot()}
+    period = next((item for item in MARKET_KLINE_COLLECTION_PERIODS if item not in snapshots), None)
+    if period is None:
+        return None
+
+    with _market_kline_coverage_snapshot_lock:
+        _market_kline_coverage_snapshot_state["refreshing"] = True
+    try:
+        store_instance.refresh_market_kline_coverage_snapshot(period, now)
+        with _market_kline_coverage_snapshot_lock:
+            _market_kline_coverage_snapshot_state["lastTriggeredAt"] = _now_iso()
+            _market_kline_coverage_snapshot_state["lastRefreshedPeriod"] = period
+        return period
+    except Exception as exc:
+        with _market_kline_coverage_snapshot_lock:
+            _market_kline_coverage_snapshot_state["lastError"] = str(exc)
+        return None
+    finally:
+        with _market_kline_coverage_snapshot_lock:
+            _market_kline_coverage_snapshot_state["refreshing"] = False
+
+
+def start_market_kline_coverage_snapshot_scheduler(store_instance: Any, check_interval_seconds: int = 300) -> None:
+    global _market_kline_coverage_snapshot_stop_event, _market_kline_coverage_snapshot_thread
+    with _market_kline_coverage_snapshot_lock:
+        if _market_kline_coverage_snapshot_thread is not None and _market_kline_coverage_snapshot_thread.is_alive():
+            return
+        _market_kline_coverage_snapshot_stop_event = threading.Event()
+        _market_kline_coverage_snapshot_state.update(
+            {
+                "running": True,
+                "checkIntervalSeconds": check_interval_seconds,
+                "lastError": "",
+            }
+        )
+        _market_kline_coverage_snapshot_thread = threading.Thread(
+            target=_market_kline_coverage_snapshot_loop,
+            args=(store_instance, check_interval_seconds, _market_kline_coverage_snapshot_stop_event),
+            daemon=True,
+        )
+        _market_kline_coverage_snapshot_thread.start()
+
+
+def stop_market_kline_coverage_snapshot_scheduler() -> None:
+    global _market_kline_coverage_snapshot_stop_event, _market_kline_coverage_snapshot_thread
+    with _market_kline_coverage_snapshot_lock:
+        stop_event = _market_kline_coverage_snapshot_stop_event
+        thread = _market_kline_coverage_snapshot_thread
+        _market_kline_coverage_snapshot_stop_event = None
+        _market_kline_coverage_snapshot_thread = None
+        _market_kline_coverage_snapshot_state["running"] = False
+        _market_kline_coverage_snapshot_state["refreshing"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _market_kline_coverage_snapshot_loop(
+    store_instance: Any,
+    check_interval_seconds: int,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
+        run_market_kline_coverage_snapshot_scheduler_tick(store_instance)
+        if stop_event.wait(check_interval_seconds):
+            break
+
+
+_market_kline_cleanup_lock = threading.Lock()
+_market_kline_cleanup_stop_event: threading.Event | None = None
+_market_kline_cleanup_thread: threading.Thread | None = None
+_market_kline_cleanup_state: dict[str, Any] = {
+    "running": False,
+    "cleaning": False,
+    "checkIntervalSeconds": 3600,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastCleanupDate": None,
+    "lastDeletedCandles": 0,
+    "lastDeletedByPeriod": {},
+    "lastError": "",
+}
+
+
+def _market_kline_cleanup_is_cleaning() -> bool:
+    with _market_kline_cleanup_lock:
+        return bool(_market_kline_cleanup_state.get("cleaning"))
+
+
+def run_market_kline_cleanup_scheduler_tick(
+    store_instance: Any,
+    now: datetime | None = None,
+    batch_size: int = MARKET_KLINE_CLEANUP_BATCH_SIZE,
+) -> dict[str, Any]:
+    check_time = _as_utc(now or datetime.now(timezone.utc))
+    cleanup_date = check_time.date().isoformat()
+    with _market_kline_cleanup_lock:
+        _market_kline_cleanup_state["lastCheckedAt"] = _now_iso()
+        _market_kline_cleanup_state["lastError"] = ""
+        if _market_kline_cleanup_state.get("lastCleanupDate") == cleanup_date:
+            return {"deletedCandles": 0, "periods": {}, "skipped": "already_ran_today"}
+
+    if _market_kline_collection_is_collecting() or _market_kline_backfill_is_backfilling():
+        return {"deletedCandles": 0, "periods": {}, "skipped": "kline_busy"}
+
+    with _market_kline_cleanup_lock:
+        _market_kline_cleanup_state["cleaning"] = True
+
+    try:
+        deleted_by_period = store_instance.delete_old_market_klines(check_time, batch_size)
+        deleted_total = sum(deleted_by_period.values())
+        with _market_kline_cleanup_lock:
+            _market_kline_cleanup_state["lastTriggeredAt"] = _now_iso()
+            _market_kline_cleanup_state["lastCleanupDate"] = cleanup_date
+            _market_kline_cleanup_state["lastDeletedCandles"] = deleted_total
+            _market_kline_cleanup_state["lastDeletedByPeriod"] = deleted_by_period
+        return {"deletedCandles": deleted_total, "periods": deleted_by_period}
+    except Exception as exc:
+        with _market_kline_cleanup_lock:
+            _market_kline_cleanup_state["lastError"] = str(exc)
+        raise
+    finally:
+        with _market_kline_cleanup_lock:
+            _market_kline_cleanup_state["cleaning"] = False
+
+
+def start_market_kline_cleanup_scheduler(store_instance: Any, check_interval_seconds: int = 3600) -> None:
+    global _market_kline_cleanup_stop_event, _market_kline_cleanup_thread
+    with _market_kline_cleanup_lock:
+        if _market_kline_cleanup_thread is not None and _market_kline_cleanup_thread.is_alive():
+            return
+        _market_kline_cleanup_stop_event = threading.Event()
+        _market_kline_cleanup_state.update({"running": True, "checkIntervalSeconds": check_interval_seconds, "lastError": ""})
+        _market_kline_cleanup_thread = threading.Thread(
+            target=_market_kline_cleanup_loop,
+            args=(store_instance, check_interval_seconds, _market_kline_cleanup_stop_event),
+            daemon=True,
+        )
+        _market_kline_cleanup_thread.start()
+
+
+def stop_market_kline_cleanup_scheduler() -> None:
+    global _market_kline_cleanup_stop_event, _market_kline_cleanup_thread
+    with _market_kline_cleanup_lock:
+        stop_event = _market_kline_cleanup_stop_event
+        thread = _market_kline_cleanup_thread
+        _market_kline_cleanup_stop_event = None
+        _market_kline_cleanup_thread = None
+        _market_kline_cleanup_state["running"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _market_kline_cleanup_loop(store_instance: Any, check_interval_seconds: int, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            run_market_kline_cleanup_scheduler_tick(store_instance)
+        except Exception as exc:
+            with _market_kline_cleanup_lock:
+                _market_kline_cleanup_state["lastCheckedAt"] = _now_iso()
+                _market_kline_cleanup_state["lastError"] = str(exc)
+        if stop_event.wait(check_interval_seconds):
+            break
+
+
+_market_kline_backfill_lock = threading.Lock()
+_market_kline_backfill_stop_event: threading.Event | None = None
+_market_kline_backfill_thread: threading.Thread | None = None
+_market_kline_backfill_state: dict[str, Any] = {
+    "running": False,
+    "backfilling": False,
+    "checkIntervalSeconds": 30,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "currentSymbol": "",
+    "currentPeriod": "",
+    "completedPairs": 0,
+    "totalPairs": 0,
+    "storedCandles": 0,
+    "lastError": "",
+}
+
+
+def _market_kline_backfill_is_backfilling() -> bool:
+    with _market_kline_backfill_lock:
+        return bool(_market_kline_backfill_state.get("backfilling"))
+
+
+def _market_kline_backfill_has_unfinished_tasks(store_instance: Any) -> bool:
+    try:
+        return any(task.status in {"pending", "running", "failed"} for task in store_instance.market_kline_backfill_tasks)
+    except Exception:
+        return False
+
+
+def run_market_kline_backfill_scheduler_tick(
+    store_instance: Any,
+    now: datetime | None = None,
+    max_pairs: int = BACKFILL_MAX_PAIRS_PER_TICK,
+    max_pages_per_pair: int = BACKFILL_MAX_PAGES_PER_PAIR,
+) -> dict[str, Any]:
+    check_time = _as_utc(now or datetime.now(timezone.utc))
+    with _market_kline_backfill_lock:
+        _market_kline_backfill_state["lastCheckedAt"] = _now_iso()
+        _market_kline_backfill_state["lastError"] = ""
+
+    if _market_kline_cleanup_is_cleaning():
+        return {"processedPairs": 0, "storedCandles": 0, "errors": [], "skipped": "cleanup_running"}
+
+    if _market_kline_collection_is_collecting():
+        return {"processedPairs": 0, "storedCandles": 0, "errors": [], "skipped": "incremental_collecting"}
+
+    symbols = fetch_tradable_symbols()
+    tasks = _ensure_market_kline_backfill_tasks(store_instance, symbols, check_time)
+    candidate_tasks = _refresh_market_kline_backfill_candidate_tasks(
+        store_instance,
+        tasks,
+        check_time,
+        max_candidates=max(max_pairs * 2, max_pairs),
+    )
+    pending_tasks = [task for task in candidate_tasks if task.status in {"pending", "running", "failed"}][:max_pairs]
+    errors: list[str] = []
+    stored_candles = 0
+    processed_pairs = 0
+
+    with _market_kline_backfill_lock:
+        _market_kline_backfill_state["backfilling"] = bool(pending_tasks)
+        _market_kline_backfill_state["totalPairs"] = len(tasks)
+        _market_kline_backfill_state["completedPairs"] = sum(1 for task in tasks if task.status == "completed")
+
+    try:
+        for task in pending_tasks:
+            processed_pairs += 1
+            with _market_kline_backfill_lock:
+                _market_kline_backfill_state["currentSymbol"] = task.symbol
+                _market_kline_backfill_state["currentPeriod"] = task.period
+            try:
+                updated_task, task_stored = _advance_market_kline_backfill_task(
+                    store_instance,
+                    task,
+                    max_pages=max_pages_per_pair,
+                )
+                stored_candles += task_stored
+                store_instance.upsert_market_kline_backfill_task(updated_task)
+            except Exception as exc:
+                errors.append(f"{task.symbol} / {task.period}: {exc}")
+                failed = task.model_copy(update={"status": "failed", "lastError": str(exc), "updatedAt": _now_iso()})
+                store_instance.upsert_market_kline_backfill_task(failed)
+
+        refreshed_tasks = store_instance.market_kline_backfill_tasks
+        with _market_kline_backfill_lock:
+            _market_kline_backfill_state["lastTriggeredAt"] = _now_iso()
+            _market_kline_backfill_state["completedPairs"] = sum(1 for task in refreshed_tasks if task.status == "completed")
+            _market_kline_backfill_state["totalPairs"] = len(refreshed_tasks)
+            _market_kline_backfill_state["storedCandles"] = stored_candles
+            _market_kline_backfill_state["lastError"] = "\n".join(errors[:3])
+    finally:
+        with _market_kline_backfill_lock:
+            _market_kline_backfill_state["backfilling"] = False
+            _market_kline_backfill_state["currentSymbol"] = ""
+            _market_kline_backfill_state["currentPeriod"] = ""
+
+    return {"processedPairs": processed_pairs, "storedCandles": stored_candles, "errors": errors}
+
+
+def start_market_kline_backfill_scheduler(store_instance: Any, check_interval_seconds: int = 10) -> None:
+    global _market_kline_backfill_stop_event, _market_kline_backfill_thread
+    with _market_kline_backfill_lock:
+        if _market_kline_backfill_thread is not None and _market_kline_backfill_thread.is_alive():
+            return
+        _market_kline_backfill_stop_event = threading.Event()
+        _market_kline_backfill_state.update({"running": True, "checkIntervalSeconds": check_interval_seconds, "lastError": ""})
+        _market_kline_backfill_thread = threading.Thread(
+            target=_market_kline_backfill_loop,
+            args=(store_instance, check_interval_seconds, _market_kline_backfill_stop_event),
+            daemon=True,
+        )
+        _market_kline_backfill_thread.start()
+
+
+def stop_market_kline_backfill_scheduler() -> None:
+    global _market_kline_backfill_stop_event, _market_kline_backfill_thread
+    with _market_kline_backfill_lock:
+        stop_event = _market_kline_backfill_stop_event
+        thread = _market_kline_backfill_thread
+        _market_kline_backfill_stop_event = None
+        _market_kline_backfill_thread = None
+        _market_kline_backfill_state["running"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _market_kline_backfill_loop(store_instance: Any, check_interval_seconds: int, stop_event: threading.Event) -> None:
+    while not stop_event.wait(check_interval_seconds):
+        try:
+            run_market_kline_backfill_scheduler_tick(store_instance)
+        except Exception as exc:
+            with _market_kline_backfill_lock:
+                _market_kline_backfill_state["lastCheckedAt"] = _now_iso()
+                _market_kline_backfill_state["lastError"] = str(exc)
+
+
+def _ensure_market_kline_backfill_tasks(store_instance: Any, symbols: list[str], now: datetime) -> list[MarketKlineBackfillTask]:
+    existing = {task.id: task for task in store_instance.market_kline_backfill_tasks}
+    for symbol in symbols:
+        normalized_symbol = symbol.upper()
+        for period in MARKET_KLINE_NATIVE_PERIODS:
+            target_start = _market_kline_target_start(period, now)
+            target_end = _latest_period_boundary(period, now)
+            task_id = _market_kline_backfill_task_id(normalized_symbol, period)
+            if task_id in existing:
+                continue
+            next_start = _market_kline_initial_backfill_start(store_instance, normalized_symbol, period, target_start, target_end)
+            status = "completed" if next_start >= target_end else "pending"
+            task = MarketKlineBackfillTask(
+                id=task_id,
+                symbol=normalized_symbol,
+                period=period,  # type: ignore[arg-type]
+                targetStart=target_start.isoformat(),
+                targetEnd=target_end.isoformat(),
+                nextStart=next_start.isoformat(),
+                status=status,  # type: ignore[arg-type]
+                createdAt=_now_iso(),
+                updatedAt=_now_iso(),
+            )
+            store_instance.upsert_market_kline_backfill_task(task)
+    period_order = {period: index for index, period in enumerate(MARKET_KLINE_NATIVE_PERIODS)}
+    priority_symbols = _market_kline_backfill_priority_symbols(store_instance)
+    return sorted(
+        store_instance.market_kline_backfill_tasks,
+        key=lambda task: (
+            1 if task.status == "completed" else 0,
+            _market_kline_backfill_symbol_priority(task.symbol, priority_symbols),
+            task.symbol,
+            period_order.get(task.period, 999),
+        ),
+    )
+
+
+def _refresh_market_kline_backfill_candidate_tasks(
+    store_instance: Any,
+    tasks: list[MarketKlineBackfillTask],
+    now: datetime,
+    max_candidates: int,
+) -> list[MarketKlineBackfillTask]:
+    refreshed_by_id: dict[str, MarketKlineBackfillTask] = {}
+    for task in tasks[:max_candidates]:
+        target_start = _market_kline_target_start(task.period, now)
+        target_end = _latest_period_boundary(task.period, now)
+        refreshed = _refresh_market_kline_backfill_task_window(task, target_start, target_end)
+        refreshed_by_id[task.id] = refreshed
+        if refreshed != task:
+            store_instance.upsert_market_kline_backfill_task(refreshed)
+    if not refreshed_by_id:
+        return tasks
+    return [refreshed_by_id.get(task.id, task) for task in tasks]
+
+
+def _market_kline_backfill_priority_symbols(store_instance: Any) -> set[str]:
+    symbols = {symbol.upper() for symbol in MARKET_KLINE_PRIORITY_SYMBOLS}
+    for item in getattr(store_instance, "watchlist", []) or []:
+        symbol = getattr(item, "symbol", "")
+        if symbol:
+            symbols.add(str(symbol).upper())
+    for signal in getattr(store_instance, "signals", []) or []:
+        symbol = getattr(signal, "symbol", "")
+        if symbol:
+            symbols.add(str(symbol).upper())
+    return symbols
+
+
+def _market_kline_backfill_symbol_priority(symbol: str, priority_symbols: set[str]) -> int:
+    normalized = symbol.upper()
+    if normalized in priority_symbols:
+        return 0
+    return 10
+
+
+def _refresh_market_kline_backfill_task_window(
+    task: MarketKlineBackfillTask,
+    target_start: datetime,
+    target_end: datetime,
+) -> MarketKlineBackfillTask:
+    current_target_end = _parse_datetime(task.targetEnd)
+    current_next_start = _parse_datetime(task.nextStart)
+    if current_target_end is None or current_next_start is None:
+        return task.model_copy(
+            update={
+                "targetStart": target_start.isoformat(),
+                "targetEnd": target_end.isoformat(),
+                "nextStart": target_start.isoformat(),
+                "status": "pending",
+                "updatedAt": _now_iso(),
+            }
+        )
+
+    next_start = max(_as_utc(current_next_start), target_start)
+    update: dict[str, Any] = {}
+    if task.targetStart != target_start.isoformat():
+        update["targetStart"] = target_start.isoformat()
+    if _as_utc(current_target_end) < target_end:
+        update["targetEnd"] = target_end.isoformat()
+        if task.status == "completed":
+            update["nextStart"] = min(max(_as_utc(current_target_end), target_start), target_end).isoformat()
+            update["status"] = "running"
+    elif next_start != _as_utc(current_next_start):
+        update["nextStart"] = min(next_start, target_end).isoformat()
+        if task.status != "completed":
+            update["status"] = "pending"
+
+    if not update:
+        return task
+    update["updatedAt"] = _now_iso()
+    return task.model_copy(update=update)
+
+
+def _market_kline_initial_backfill_start(
+    store_instance: Any,
+    symbol: str,
+    period: str,
+    target_start: datetime,
+    target_end: datetime,
+) -> datetime:
+    earliest, latest = store_instance.market_kline_time_range(symbol, period)
+    if earliest is None or latest is None:
+        return target_start
+    earliest_utc = _as_utc(earliest)
+    latest_utc = _as_utc(latest)
+    if earliest_utc > target_start:
+        return target_start
+    return min(latest_utc + timedelta(seconds=_period_seconds(period)), target_end)
+
+
+def _advance_market_kline_backfill_task(
+    store_instance: Any,
+    task: MarketKlineBackfillTask,
+    max_pages: int,
+) -> tuple[MarketKlineBackfillTask, int]:
+    next_start = _parse_datetime(task.nextStart)
+    target_end = _parse_datetime(task.targetEnd)
+    if next_start is None or target_end is None:
+        raise ValueError("Backfill task time range is invalid")
+    current_start = _as_utc(next_start)
+    target_end = _as_utc(target_end)
+    if current_start >= target_end:
+        return task.model_copy(update={"status": "completed", "updatedAt": _now_iso()}), 0
+
+    stored_candles = 0
+    pages_fetched = task.pagesFetched
+    for page_index in range(max_pages):
+        candles = fetch_market_candles_range(task.symbol, task.period, current_start, target_end, BACKFILL_PAGE_LIMIT)
+        if not candles:
+            current_start = target_end
+            break
+        store_instance.upsert_market_candles(task.symbol, task.period, candles)
+        stored_candles += len(candles)
+        pages_fetched += 1
+        last_time = _parse_datetime(candles[-1].time)
+        current_start = (_as_utc(last_time) + timedelta(seconds=_period_seconds(task.period))) if last_time else target_end
+        if current_start >= target_end:
+            break
+        if page_index < max_pages - 1 and BACKFILL_REQUEST_SLEEP_SECONDS > 0:
+            time.sleep(BACKFILL_REQUEST_SLEEP_SECONDS)
+
+    status = "completed" if current_start >= target_end else "running"
+    return task.model_copy(
+        update={
+            "status": status,
+            "nextStart": min(current_start, target_end).isoformat(),
+            "pagesFetched": pages_fetched,
+            "storedCandles": task.storedCandles + stored_candles,
+            "lastError": "",
+            "updatedAt": _now_iso(),
+        }
+    ), stored_candles
+
+
+def _market_kline_target_start(period: str, now: datetime) -> datetime:
+    cutoff = _market_kline_retention_cutoffs(now)[str(period).upper()]
+    parsed = _parse_datetime(cutoff)
+    if parsed is None:
+        raise ValueError(f"Invalid market kline retention cutoff for {period}: {cutoff}")
+    return _as_utc(parsed)
+
+
+def _market_kline_backfill_task_id(symbol: str, period: str) -> str:
+    return f"mkbf-{symbol.upper()}-{str(period).upper()}"
+
+
+_market_kline_collection_lock = threading.Lock()
+_market_kline_collection_stop_event: threading.Event | None = None
+_market_kline_collection_thread: threading.Thread | None = None
+_market_kline_collection_state: dict[str, Any] = {
+    "running": False,
+    "collecting": False,
+    "checkIntervalSeconds": 60,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastCollectedBoundaries": {},
+    "lastStoredCandles": 0,
+    "lastSkippedPairs": 0,
+    "lastError": "",
+}
+
+
+def _market_kline_collection_is_collecting() -> bool:
+    with _market_kline_collection_lock:
+        return bool(_market_kline_collection_state.get("collecting"))
+
+
+def run_market_kline_collection_scheduler_tick(
+    store_instance: Any,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    check_time = _as_utc(now or datetime.now(timezone.utc))
+    due_periods = _market_kline_collection_due_periods(check_time)
+    with _market_kline_collection_lock:
+        _market_kline_collection_state["lastCheckedAt"] = _now_iso()
+        _market_kline_collection_state["lastError"] = ""
+
+    if not due_periods:
+        return {"periods": [], "symbols": 0, "storedCandles": 0, "errors": []}
+
+    if _market_kline_cleanup_is_cleaning():
+        return {"periods": [], "symbols": 0, "storedCandles": 0, "errors": [], "skipped": "cleanup_running"}
+
+    if _market_kline_backfill_is_backfilling():
+        return {"periods": [], "symbols": 0, "storedCandles": 0, "errors": [], "skipped": "backfill_running"}
+
+    with _market_kline_collection_lock:
+        _market_kline_collection_state["collecting"] = True
+
+    try:
+        symbols = fetch_tradable_symbols()
+        errors: list[str] = []
+        stored_candles = 0
+        skipped_pairs = 0
+        completed_boundaries: dict[str, str] = {}
+        backfill_status_by_pair = {
+            (task.symbol.upper(), task.period.upper()): task.status for task in store_instance.market_kline_backfill_tasks
+        }
+
+        for period in due_periods:
+            boundary = _latest_period_boundary(period, check_time).isoformat()
+            for symbol in symbols:
+                status = backfill_status_by_pair.get((symbol.upper(), period.upper()))
+                if status is not None and status != "completed":
+                    skipped_pairs += 1
+                    continue
+                try:
+                    candles = fetch_market_candles(symbol, period, limit=INCREMENTAL_KLINE_LIMIT)
+                    store_instance.upsert_market_candles(symbol, period, candles)
+                    stored_candles += len(candles)
+                except Exception as exc:
+                    errors.append(f"{period} / {symbol}: {exc}")
+            completed_boundaries[period] = boundary
+
+        with _market_kline_collection_lock:
+            collected = dict(_market_kline_collection_state.get("lastCollectedBoundaries") or {})
+            collected.update(completed_boundaries)
+            _market_kline_collection_state["lastCollectedBoundaries"] = collected
+            _market_kline_collection_state["lastTriggeredAt"] = _now_iso()
+            _market_kline_collection_state["lastStoredCandles"] = stored_candles
+            _market_kline_collection_state["lastSkippedPairs"] = skipped_pairs
+            if errors:
+                _market_kline_collection_state["lastError"] = "\n".join(errors[:3])
+    finally:
+        with _market_kline_collection_lock:
+            _market_kline_collection_state["collecting"] = False
+
+    return {
+        "periods": due_periods,
+        "symbols": len(symbols),
+        "storedCandles": stored_candles,
+        "skippedPairs": skipped_pairs,
+        "errors": errors,
+    }
+
+
+def _market_kline_collection_due_periods(now: datetime) -> list[str]:
+    with _market_kline_collection_lock:
+        collected = dict(_market_kline_collection_state.get("lastCollectedBoundaries") or {})
+    due_periods: list[str] = []
+    for period in MARKET_KLINE_NATIVE_PERIODS:
+        boundary = _latest_period_boundary(period, now).isoformat()
+        if collected.get(period) != boundary:
+            due_periods.append(period)
+    return due_periods
+
+
+def start_market_kline_collection_scheduler(store_instance: Any, check_interval_seconds: int = 60) -> None:
+    global _market_kline_collection_stop_event, _market_kline_collection_thread
+    with _market_kline_collection_lock:
+        if _market_kline_collection_thread is not None and _market_kline_collection_thread.is_alive():
+            return
+        _market_kline_collection_stop_event = threading.Event()
+        _market_kline_collection_state.update(
+            {
+                "running": True,
+                "checkIntervalSeconds": check_interval_seconds,
+                "lastError": "",
+            }
+        )
+        _market_kline_collection_thread = threading.Thread(
+            target=_market_kline_collection_loop,
+            args=(store_instance, check_interval_seconds, _market_kline_collection_stop_event),
+            daemon=True,
+        )
+        _market_kline_collection_thread.start()
+
+
+def stop_market_kline_collection_scheduler() -> None:
+    global _market_kline_collection_stop_event, _market_kline_collection_thread
+    with _market_kline_collection_lock:
+        stop_event = _market_kline_collection_stop_event
+        thread = _market_kline_collection_thread
+        _market_kline_collection_stop_event = None
+        _market_kline_collection_thread = None
+        _market_kline_collection_state["running"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _market_kline_collection_loop(store_instance: Any, check_interval_seconds: int, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            run_market_kline_collection_scheduler_tick(store_instance)
+        except Exception as exc:
+            with _market_kline_collection_lock:
+                _market_kline_collection_state["lastCheckedAt"] = _now_iso()
+                _market_kline_collection_state["lastError"] = str(exc)
+        if stop_event.wait(check_interval_seconds):
+            break
+
+
 def _normalize_symbol_blacklist(symbols: list[str] | None) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -2250,10 +3726,8 @@ def _normalize_symbol_blacklist(symbols: list[str] | None) -> list[str]:
 
 
 def fetch_market_candles(symbol: str, period: str, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]:
-    interval_map = {"1H": "1h", "4H": "4h", "1D": "1d"}
-    interval = interval_map.get(period)
-    if interval is None:
-        raise ValueError(f"Unsupported period: {period}")
+    normalized_period = str(period).upper()
+    interval = _binance_interval(normalized_period)
 
     query = urllib.parse.urlencode({
         "symbol": symbol.upper(),
@@ -2284,6 +3758,109 @@ def fetch_market_candles(symbol: str, period: str, limit: int = CLOSED_KLINE_LIM
     ]
     _populate_moving_averages(candles)
     return candles
+
+
+def fetch_market_candles_range(
+    symbol: str,
+    period: str,
+    start_time: datetime,
+    end_time: datetime,
+    limit: int = BACKFILL_PAGE_LIMIT,
+) -> list[Candle]:
+    normalized_period = str(period).upper()
+    interval = _binance_interval(normalized_period)
+    start_utc = _as_utc(start_time)
+    end_utc = _as_utc(end_time)
+    if start_utc >= end_utc:
+        return []
+
+    query = urllib.parse.urlencode({
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "startTime": str(int(start_utc.timestamp() * 1000)),
+        "endTime": str(int(end_utc.timestamp() * 1000)),
+        "limit": str(min(max(1, limit), 1500)),
+    })
+    url = f"https://fapi.binance.com/fapi/v1/klines?{query}"
+    raw_payload = _read_url_with_retry(url, timeout=10)
+    rows = json.loads(raw_payload)
+    if not isinstance(rows, list):
+        raise ValueError("Invalid Binance kline response")
+
+    candles = [
+        Candle(
+            time=datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc).isoformat(),
+            open=float(row[1]),
+            high=float(row[2]),
+            low=float(row[3]),
+            close=float(row[4]),
+            volume=float(row[5]),
+            ma5=0,
+            ma20=0,
+            ma60=0,
+        )
+        for row in rows
+        if isinstance(row, list)
+        and len(row) >= 6
+        and start_utc <= datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc) < end_utc
+    ]
+    _populate_moving_averages(candles)
+    return candles
+
+
+def _binance_interval(period: str) -> str:
+    interval_map = {"5M": "5m", "15M": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
+    interval = interval_map.get(str(period).upper())
+    if interval is None:
+        raise ValueError(f"Unsupported period: {period}")
+    return interval
+
+
+def _period_seconds(period: str) -> int:
+    return {"5M": 300, "15M": 900, "1H": 3600, "4H": 14400, "1D": 86400}[str(period).upper()]
+
+
+def _floor_datetime_to_period(value: datetime, period: str) -> datetime:
+    utc_value = _as_utc(value)
+    seconds = _period_seconds(period)
+    floored_timestamp = int(utc_value.timestamp()) // seconds * seconds
+    return datetime.fromtimestamp(floored_timestamp, tz=timezone.utc)
+
+
+def _aggregate_market_candles(source_candles: list[Candle], period: str) -> list[Candle]:
+    normalized_period = str(period).upper()
+    expected_count = _period_seconds(normalized_period) // _period_seconds("5M")
+    if expected_count <= 1:
+        return []
+
+    grouped: dict[str, list[Candle]] = {}
+    for candle in source_candles:
+        candle_time = _parse_datetime(candle.time)
+        if candle_time is None:
+            continue
+        bucket_start = _floor_datetime_to_period(candle_time, normalized_period).isoformat()
+        grouped.setdefault(bucket_start, []).append(candle)
+
+    aggregated: list[Candle] = []
+    for bucket_start, bucket_candles in sorted(grouped.items()):
+        ordered = sorted(bucket_candles, key=lambda item: item.time)
+        if len(ordered) != expected_count:
+            continue
+        aggregated.append(
+            Candle(
+                time=bucket_start,
+                open=ordered[0].open,
+                high=max(candle.high for candle in ordered),
+                low=min(candle.low for candle in ordered),
+                close=ordered[-1].close,
+                volume=sum(candle.volume for candle in ordered),
+                ma5=0,
+                ma20=0,
+                ma60=0,
+            )
+        )
+    _populate_moving_averages(aggregated)
+    return aggregated
 
 
 def _read_url_with_retry(url: str, timeout: int) -> str:
@@ -2988,12 +4565,7 @@ def _assert_mysql_reset_allowed(database: str) -> None:
 
 def create_store() -> Store:
     _load_env_file()
-    driver = os.getenv("SIGNAL_DB_DRIVER", "sqlite").lower()
-    if driver == "mysql":
-        return MySQLStore()
-    if driver == "sqlite":
-        return SQLiteStore()
-    raise RuntimeError(f"Unsupported SIGNAL_DB_DRIVER: {driver}")
+    return MySQLStore()
 
 
 store = create_store()

@@ -3,11 +3,15 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-Period = Literal["1H", "4H", "1D"]
+Period = Literal["5M", "15M", "1H", "4H", "1D"]
 StrengthGrade = Literal["S", "A", "B", "C"]
 WatchStatus = Literal["pending", "matched", "unmatched"]
 GenerationSource = Literal["llm", "fallback"]
 NewCoinListingStatus = Literal["discovered", "upcoming", "listed"]
+SignalPerformanceStatus = Literal["tracking", "completed", "insufficient_data"]
+SignalReviewStatus = Literal["pending", "generated", "failed", "skipped"]
+SignalReviewResult = Literal["effective", "weak", "failed", "insufficient_data"]
+MarketKlineBackfillTaskStatus = Literal["pending", "running", "completed", "failed"]
 
 
 class Candle(BaseModel):
@@ -308,6 +312,50 @@ class Signal(BaseModel):
     analysis: list[str]
     strengthGrade: StrengthGrade
     candles: list[Candle]
+    performance: "SignalPerformance | None" = None
+
+
+class SignalPerformance(BaseModel):
+    id: str
+    signalId: str
+    symbol: str
+    period: Period
+    strategyId: str
+    strategyName: str
+    entryPrice: float
+    status: SignalPerformanceStatus = "tracking"
+    trackingPeriod: Period = "1H"
+    change1hPct: float | None = None
+    change4hPct: float | None = None
+    change24hPct: float | None = None
+    maxGainPct: float | None = None
+    maxDrawdownPct: float | None = None
+    bestPrice: float | None = None
+    worstPrice: float | None = None
+    evaluatedUntil: str | None = None
+    reviewStatus: SignalReviewStatus = "pending"
+    reviewResult: SignalReviewResult | None = None
+    reviewSummary: str = ""
+    reviewAnalysis: str = ""
+    reviewSuggestions: list[str] = Field(default_factory=list)
+    reviewGeneratedAt: str | None = None
+    reviewSource: Literal["rules", "llm"] = "rules"
+    createdAt: str
+    updatedAt: str
+
+
+class StrategyLesson(BaseModel):
+    id: str
+    strategyId: str
+    signalId: str
+    result: SignalReviewResult
+    failureReason: str = ""
+    effectivePattern: str = ""
+    improvementIdeas: list[str] = Field(default_factory=list)
+    suggestedRuleChanges: list[dict[str, str]] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
+    adopted: bool = False
+    createdAt: str
 
 
 class MarketKline(BaseModel):
@@ -318,6 +366,129 @@ class MarketKline(BaseModel):
     candle: Candle
     createdAt: str
     updatedAt: str
+
+
+class MarketKlineBackfillTask(BaseModel):
+    id: str
+    symbol: str
+    period: Period
+    targetStart: str
+    targetEnd: str
+    nextStart: str
+    status: MarketKlineBackfillTaskStatus = "pending"
+    pagesFetched: int = 0
+    storedCandles: int = 0
+    lastError: str = ""
+    createdAt: str
+    updatedAt: str
+
+
+class MarketKlineTaskCard(BaseModel):
+    name: str
+    status: Literal["running", "waiting", "completed", "warning"]
+    statusLabel: str
+    phase: str
+    progressCurrent: int | None = None
+    progressTotal: int | None = None
+    progressPercent: float | None = None
+    primaryMetric: str
+    secondaryMetric: str
+    lastRunAt: str | None = None
+    lastError: str = ""
+
+
+class MarketKlinePeriodProgress(BaseModel):
+    period: Period
+    total: int
+    completed: int
+    running: int
+    pending: int
+    failed: int
+    progressPercent: float
+
+
+class MarketKlineCoverage(BaseModel):
+    period: Period
+    rows: int
+    symbols: int
+    targetWindow: str
+    earliestOpenTime: str | None = None
+    latestOpenTime: str | None = None
+    status: Literal["normal", "empty"]
+    statusLabel: str
+
+
+class MarketKlineRunningTask(BaseModel):
+    symbol: str
+    period: Period
+    pagesFetched: int
+    storedCandles: int
+    nextStart: str
+    targetEnd: str
+    updatedAt: str
+    lastError: str = ""
+
+
+class MarketKlineRecentTask(BaseModel):
+    type: Literal["backfill", "incremental", "cleanup"]
+    status: str
+    target: str
+    amount: str
+    updatedAt: str | None = None
+    note: str = ""
+
+
+class MarketKlineStatusResponse(BaseModel):
+    updatedAt: str
+    overallStatus: Literal["running", "waiting", "completed", "warning"]
+    overallStatusLabel: str
+    activePhase: str
+    cards: list[MarketKlineTaskCard]
+    periodProgress: list[MarketKlinePeriodProgress]
+    coverage: list[MarketKlineCoverage]
+    runningTasks: list[MarketKlineRunningTask]
+    recentTasks: list[MarketKlineRecentTask]
+    risks: list[str]
+
+
+class MarketRadarEnvironment(BaseModel):
+    score: int
+    status: Literal["tradable", "watch_only", "avoid"]
+    label: str
+    summary: str
+    notes: list[str]
+
+
+class MarketRadarMetrics(BaseModel):
+    symbolsAnalyzed: int
+    risingRatio: float
+    volumeExpansionRatio: float
+    strongTrendRatio: float
+    averageVolatility: float
+    majorTrend: str
+
+
+class MarketRadarRecommendation(BaseModel):
+    symbol: str
+    category: Literal["breakout", "pullback", "volume_start", "watch"]
+    score: int
+    period: Period
+    trend: str
+    volume: str
+    riskLevel: Literal["low", "medium", "high"]
+    changePct: float
+    volumeRatio: float
+    volatilityPct: float
+    reason: str
+    riskNote: str
+
+
+class MarketRadarResponse(BaseModel):
+    updatedAt: str
+    environment: MarketRadarEnvironment
+    metrics: MarketRadarMetrics
+    opportunityGroups: dict[str, int]
+    recommendations: list[MarketRadarRecommendation]
 
 
 class WatchCondition(BaseModel):

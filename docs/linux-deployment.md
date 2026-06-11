@@ -157,7 +157,6 @@ sudo nano /opt/axis/backend/.env
 示例：
 
 ```env
-SIGNAL_DB_DRIVER=mysql
 MYSQL_HOST=<RDS_HOST>
 MYSQL_PORT=3306
 MYSQL_USER=axis_app

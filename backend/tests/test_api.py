@@ -1,15 +1,21 @@
 import os
-import tempfile
+import inspect
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
 from pathlib import Path
 
-test_db_path = Path(tempfile.gettempdir()) / f"axis-api-test-{os.getpid()}.sqlite3"
-if test_db_path.exists():
-    test_db_path.unlink()
+env_path = Path(__file__).resolve().parents[1] / ".env"
+if env_path.exists():
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
-os.environ["SIGNAL_DB_DRIVER"] = "sqlite"
-os.environ["SIGNAL_DB_PATH"] = str(test_db_path)
+os.environ["MYSQL_DATABASE"] = "axis_test"
+os.environ["ALLOW_MYSQL_RESET"] = "1"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,13 +28,15 @@ from app.models import (
     CreateStrategyRequest,
     KnowledgeCase,
     LlmSettingsUpdate,
+    MarketKlineBackfillTask,
+    MarketKlineCoverage,
     PushoverSettingsUpdate,
     Signal,
     StrategyScanHistory,
     WatchCondition,
     WatchItem,
 )
-from app.store import MySQLStore, SQLiteStore, _normalize_generated_strategy, store
+from app.store import MySQLStore, _normalize_generated_strategy, store
 
 
 client = TestClient(app)
@@ -37,6 +45,15 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def reset_store():
     store.reset()
+    store_module._run_job_state = None
+    store_module._market_kline_collection_state["collecting"] = False
+    store_module._market_kline_collection_state["lastCollectedBoundaries"] = {}
+    store_module._market_kline_collection_state["lastSkippedPairs"] = 0
+    if hasattr(store_module, "_market_kline_backfill_state"):
+        store_module._market_kline_backfill_state["backfilling"] = False
+    if hasattr(store_module, "_market_kline_cleanup_state"):
+        store_module._market_kline_cleanup_state["cleaning"] = False
+        store_module._market_kline_cleanup_state["lastCleanupDate"] = None
 
 
 def auth_headers(email: str = "authed@example.com") -> dict[str, str]:
@@ -63,6 +80,67 @@ def sample_candles(seed: float = 1.0, count: int = 24) -> list[Candle]:
         )
         for i in range(count)
     ]
+
+
+def market_candles(seed: float = 1.0, count: int = 240, start: datetime | None = None, step_minutes: int = 60) -> list[Candle]:
+    start_time = start or datetime(2026, 5, 20, 0, 0, 0, tzinfo=timezone.utc)
+    return [
+        Candle(
+            time=(start_time + i * timedelta(minutes=step_minutes)).isoformat(),
+            open=seed + i * 0.01,
+            high=seed + i * 0.01 + 0.02,
+            low=seed + i * 0.01 - 0.02,
+            close=seed + i * 0.01 + 0.01,
+            volume=1000 + i * 10,
+            ma5=seed + i * 0.01,
+            ma20=seed + i * 0.01 - 0.01,
+            ma60=seed + i * 0.01 - 0.02,
+        )
+        for i in range(count)
+    ]
+
+
+def trend_candles(
+    start_price: float,
+    step: float,
+    count: int = 40,
+    volume: float = 1000,
+    volume_step: float = 0,
+    start: datetime | None = None,
+    step_minutes: int = 60,
+) -> list[Candle]:
+    start_time = start or datetime(2026, 5, 20, 0, 0, 0, tzinfo=timezone.utc)
+    candles: list[Candle] = []
+    price = start_price
+    for index in range(count):
+        close = price + step
+        high = max(price, close) + abs(step) * 0.5 + 0.01
+        low = min(price, close) - abs(step) * 0.5 - 0.01
+        candles.append(
+            Candle(
+                time=(start_time + index * timedelta(minutes=step_minutes)).isoformat(),
+                open=price,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume + index * volume_step,
+                ma5=close,
+                ma20=close,
+                ma60=close,
+            )
+        )
+        price = close
+    return candles
+
+
+def seed_market_candles(symbol: str, period: str = "1H", seed: float = 1.0, count: int = 240) -> None:
+    store.upsert_market_candles(symbol, period, market_candles(seed, count=count))
+
+
+def mysql_test_store(database_suffix: str) -> MySQLStore:
+    test_store = MySQLStore(database=f"axis_test_{database_suffix}")
+    test_store.reset()
+    return test_store
 
 
 def insert_sample_signal(signal_id: str = "sig-sample", symbol: str = "ALLUSDT", period: str = "1H") -> Signal:
@@ -354,9 +432,8 @@ def test_llm_strategy_generation_tolerates_null_optional_metrics():
     assert generated.historyStats.averageHoldingHours is None
 
 
-def test_llm_strategy_generation_is_cached_for_same_period_and_conditions(tmp_path, monkeypatch):
-    db_path = tmp_path / "axis-cache-test.sqlite3"
-    cache_store = SQLiteStore(db_path)
+def test_llm_strategy_generation_is_cached_for_same_period_and_conditions(monkeypatch):
+    cache_store = mysql_test_store("cache")
     cache_store.update_settings(
         AppSettingsUpdate(
             llm=LlmSettingsUpdate(
@@ -398,9 +475,8 @@ def test_llm_strategy_generation_is_cached_for_same_period_and_conditions(tmp_pa
     assert third.generationCached is False
 
 
-def test_strategy_generation_from_code_preserves_pasted_code(tmp_path, monkeypatch):
-    db_path = tmp_path / "axis-code-import-test.sqlite3"
-    code_store = SQLiteStore(db_path)
+def test_strategy_generation_from_code_preserves_pasted_code(monkeypatch):
+    code_store = mysql_test_store("code_import")
     code_store.update_settings(
         AppSettingsUpdate(
             llm=LlmSettingsUpdate(
@@ -438,9 +514,8 @@ def test_strategy_generation_from_code_preserves_pasted_code(tmp_path, monkeypat
     assert generated.structuredConditions[0].title == "代码条件"
 
 
-def test_placeholder_python_code_cache_is_ignored(tmp_path, monkeypatch):
-    db_path = tmp_path / "axis-cache-placeholder-test.sqlite3"
-    cache_store = SQLiteStore(db_path)
+def test_placeholder_python_code_cache_is_ignored(monkeypatch):
+    cache_store = mysql_test_store("cache_placeholder")
     cache_store.update_settings(
         AppSettingsUpdate(
             llm=LlmSettingsUpdate(
@@ -493,9 +568,9 @@ def test_placeholder_python_code_cache_is_ignored(tmp_path, monkeypatch):
     assert third.generationCached is True
 
 
-def test_sqlite_store_persists_created_strategy(tmp_path):
-    db_path = tmp_path / "axis-test.sqlite3"
-    first_store = SQLiteStore(db_path)
+def test_mysql_store_persists_created_strategy():
+    database = "axis_test_persist_strategy"
+    first_store = mysql_test_store("persist_strategy")
     first_store.create_strategy(
         CreateStrategyRequest(
             name="持久化策略",
@@ -505,13 +580,13 @@ def test_sqlite_store_persists_created_strategy(tmp_path):
         )
     )
 
-    second_store = SQLiteStore(db_path)
+    second_store = MySQLStore(database=database)
     assert second_store.strategies[0].name == "持久化策略"
 
 
-def test_sqlite_store_persists_strategy_scan_history(tmp_path):
-    db_path = tmp_path / "axis-history-test.sqlite3"
-    first_store = SQLiteStore(db_path)
+def test_mysql_store_persists_strategy_scan_history():
+    database = "axis_test_persist_history"
+    first_store = mysql_test_store("persist_history")
     first_store.save_strategy_scan_history(
         StrategyScanHistory(
             id="run-history-persisted",
@@ -530,7 +605,7 @@ def test_sqlite_store_persists_strategy_scan_history(tmp_path):
         )
     )
 
-    second_store = SQLiteStore(db_path)
+    second_store = MySQLStore(database=database)
     history = second_store.get_strategy_run_history()
 
     assert history[0].id == "run-history-persisted"
@@ -550,7 +625,7 @@ def test_mysql_reset_is_blocked_by_default(monkeypatch):
 def test_run_saved_strategy_creates_signal_from_python_runtime(monkeypatch):
     headers = auth_headers("runner@example.com")
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ALLUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", lambda symbol, period, limit=240: sample_candles(1.0, count=240))
+    seed_market_candles("ALLUSDT", "1H", seed=1.0)
     save_response = client.post(
         "/api/strategies",
         json={
@@ -587,16 +662,597 @@ def test_run_saved_strategy_creates_signal_from_python_runtime(monkeypatch):
     assert updated_strategy["schedule"]["lastStatus"] == "success"
 
 
-def test_run_strategy_fetches_market_candles_for_all_tradable_symbols(monkeypatch):
-    headers = auth_headers("market-runner@example.com")
+def test_kline_collection_scheduler_tick_fetches_native_periods_for_all_symbols(monkeypatch):
     calls = []
 
     def fake_fetch(symbol: str, period: str, limit: int = 240):
         calls.append((symbol, period, limit))
-        return sample_candles(2.0, count=240)
+        step_minutes = 5 if period == "5M" else 1440
+        return market_candles(2.0, count=limit, step_minutes=step_minutes)
 
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT", "SOLUSDT"])
     monkeypatch.setattr(store_module, "fetch_market_candles", fake_fetch)
+
+    result = store_module.run_market_kline_collection_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 10, 15, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["symbols"] == 2
+    assert result["periods"] == ["5M", "1D"]
+    assert result["storedCandles"] == 2 * 2 * store_module.INCREMENTAL_KLINE_LIMIT
+    assert calls == [
+        (symbol, period, store_module.INCREMENTAL_KLINE_LIMIT)
+        for period in ["5M", "1D"]
+        for symbol in ["ETHUSDT", "SOLUSDT"]
+    ]
+    assert len(store.latest_market_candles("ETHUSDT", "5M")) == store_module.INCREMENTAL_KLINE_LIMIT
+    assert len(store.latest_market_candles("SOLUSDT", "1D")) == store_module.INCREMENTAL_KLINE_LIMIT
+    assert len(store.latest_market_candles("ETHUSDT", "15M")) >= 1
+
+
+def test_market_kline_backfill_scheduler_advances_limited_tasks(monkeypatch):
+    calls = []
+
+    def fake_range(symbol: str, period: str, start_time: datetime, end_time: datetime, limit: int = 500):
+        calls.append((symbol, period, start_time.isoformat(), end_time.isoformat(), limit))
+        return market_candles(5.0, count=3, start=start_time, step_minutes=60)
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT", "SOLUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles_range", fake_range)
+
+    result = store_module.run_market_kline_backfill_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+        max_pairs=2,
+        max_pages_per_pair=1,
+    )
+
+    assert result["processedPairs"] == 2
+    assert result["storedCandles"] == 6
+    assert len(calls) == 2
+    assert all(call[4] == store_module.BACKFILL_PAGE_LIMIT for call in calls)
+    tasks = store.market_kline_backfill_tasks
+    assert len(tasks) == 4
+    running_tasks = [task for task in tasks if task.status == "running"]
+    assert len(running_tasks) == 2
+    assert [task.storedCandles for task in running_tasks] == [3, 3]
+
+
+def test_market_kline_backfill_uses_accelerated_defaults():
+    signature = inspect.signature(store_module.start_market_kline_backfill_scheduler)
+
+    assert store_module.BACKFILL_PAGE_LIMIT == 1500
+    assert store_module.BACKFILL_MAX_PAIRS_PER_TICK == 20
+    assert store_module.BACKFILL_MAX_PAGES_PER_PAIR == 2
+    assert store_module.BACKFILL_REQUEST_SLEEP_SECONDS == 0
+    assert signature.parameters["check_interval_seconds"].default == 10
+
+
+def test_market_kline_retention_uses_short_intraday_and_long_daily_windows():
+    cutoffs = store_module._market_kline_retention_cutoffs(datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc))
+
+    assert cutoffs["5M"] == datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert cutoffs["15M"] == datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert cutoffs["1H"] == datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert cutoffs["4H"] == datetime(2026, 5, 12, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert cutoffs["1D"] == datetime(2025, 6, 11, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+
+
+def test_market_kline_backfill_prioritizes_major_symbols(monkeypatch):
+    calls = []
+
+    def fake_range(symbol: str, period: str, start_time: datetime, end_time: datetime, limit: int = 500):
+        calls.append((symbol, period))
+        return []
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["0GUSDT", "BTCUSDT", "ETHUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles_range", fake_range)
+
+    result = store_module.run_market_kline_backfill_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+        max_pairs=3,
+        max_pages_per_pair=1,
+    )
+
+    assert result["processedPairs"] == 3
+    assert calls == [("BTCUSDT", "5M"), ("BTCUSDT", "1D"), ("ETHUSDT", "5M")]
+
+
+def test_market_kline_backfill_prioritizes_signal_symbols(monkeypatch):
+    calls = []
+    insert_sample_signal("sig-backfill-priority", "ZKUSDT", "1H")
+
+    def fake_range(symbol: str, period: str, start_time: datetime, end_time: datetime, limit: int = 500):
+        calls.append((symbol, period))
+        return []
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["0GUSDT", "ZKUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles_range", fake_range)
+
+    result = store_module.run_market_kline_backfill_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+        max_pairs=2,
+        max_pages_per_pair=1,
+    )
+
+    assert result["processedPairs"] == 2
+    assert calls == [("ZKUSDT", "5M"), ("ZKUSDT", "1D")]
+
+
+def test_market_kline_collection_collects_completed_pairs_while_backfill_tasks_are_unfinished(monkeypatch):
+    calls = []
+    created_at = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+    for symbol, status, next_start in [
+        ("BTCUSDT", "pending", datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc)),
+        ("ETHUSDT", "completed", datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)),
+    ]:
+        for period in ["5M", "1D"]:
+            store.upsert_market_kline_backfill_task(
+                MarketKlineBackfillTask(
+                    id=f"mkbf-{symbol}-{period}",
+                    symbol=symbol,
+                    period=period,
+                    targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+                    targetEnd=datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+                    nextStart=next_start.isoformat(),
+                    status=status,
+                    createdAt=created_at,
+                    updatedAt=created_at,
+                )
+            )
+
+    def fake_fetch(symbol: str, period: str, limit: int = 5):
+        calls.append((symbol, period, limit))
+        return market_candles(8.0, count=limit)
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["BTCUSDT", "ETHUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles", fake_fetch)
+
+    result = store_module.run_market_kline_collection_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["symbols"] == 2
+    assert result["storedCandles"] == 2 * store_module.INCREMENTAL_KLINE_LIMIT
+    assert result["skippedPairs"] == 2
+    assert calls == [
+        ("ETHUSDT", period, store_module.INCREMENTAL_KLINE_LIMIT)
+        for period in ["5M", "1D"]
+    ]
+
+
+def test_upserting_5m_candles_refreshes_derived_kline_cache():
+    start = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    candles = market_candles(10.0, count=12, start=start, step_minutes=5)
+
+    store.upsert_market_candles("ETHUSDT", "5M", candles)
+
+    fifteen = store.latest_market_candles("ETHUSDT", "15M", 10)
+    hourly = store.latest_market_candles("ETHUSDT", "1H", 10)
+    four_hour = store.latest_market_candles("ETHUSDT", "4H", 10)
+
+    assert [item.time for item in fifteen] == [
+        datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+        datetime(2026, 6, 1, 0, 15, 0, tzinfo=timezone.utc).isoformat(),
+        datetime(2026, 6, 1, 0, 30, 0, tzinfo=timezone.utc).isoformat(),
+        datetime(2026, 6, 1, 0, 45, 0, tzinfo=timezone.utc).isoformat(),
+    ]
+    assert fifteen[0].open == candles[0].open
+    assert fifteen[0].high == max(candle.high for candle in candles[:3])
+    assert fifteen[0].low == min(candle.low for candle in candles[:3])
+    assert fifteen[0].close == candles[2].close
+    assert fifteen[0].volume == sum(candle.volume for candle in candles[:3])
+    assert len(hourly) == 1
+    assert hourly[0].open == candles[0].open
+    assert hourly[0].close == candles[-1].close
+    assert len(four_hour) == 0
+
+
+def test_market_kline_backfill_starts_after_existing_latest_candle(monkeypatch):
+    calls = []
+    store.upsert_market_candles(
+        "ETHUSDT",
+        "5M",
+        [
+                *market_candles(
+                    6.0,
+                    count=1,
+                    start=datetime(2026, 3, 12, 12, 0, 0, tzinfo=timezone.utc),
+                    step_minutes=5,
+                ),
+                *market_candles(
+                    6.3,
+                    count=1,
+                    start=datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc),
+                    step_minutes=5,
+                ),
+        ],
+    )
+
+    def fake_range(symbol: str, period: str, start_time: datetime, end_time: datetime, limit: int = 500):
+        calls.append((symbol, period, start_time, end_time, limit))
+        return []
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles_range", fake_range)
+
+    store_module.run_market_kline_backfill_scheduler_tick(
+        store,
+        datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc),
+        max_pairs=5,
+        max_pages_per_pair=1,
+    )
+
+    five_minute_call = next(call for call in calls if call[1] == "5M")
+    assert five_minute_call[2] == datetime(2026, 6, 9, 10, 5, 0, tzinfo=timezone.utc)
+
+
+def test_market_kline_backfill_reopens_completed_task_when_target_end_moves(monkeypatch):
+    calls = []
+    now_iso = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-ETHUSDT-1H",
+            symbol="ETHUSDT",
+            period="1H",
+            targetStart=datetime(2026, 3, 3, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="completed",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+
+    def fake_range(symbol: str, period: str, start_time: datetime, end_time: datetime, limit: int = 500):
+        calls.append((symbol, period, start_time, end_time, limit))
+        return []
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles_range", fake_range)
+
+    store_module.run_market_kline_backfill_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+        max_pairs=5,
+        max_pages_per_pair=1,
+    )
+
+    one_hour_call = next(call for call in calls if call[1] == "1H")
+    assert one_hour_call[2] == datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+    assert one_hour_call[3] == datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_market_kline_status_summarizes_collection_jobs():
+    headers = auth_headers("kline-status@example.com")
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    for symbol, period, status, stored in [
+        ("BTCUSDT", "5M", "completed", 12),
+        ("ETHUSDT", "5M", "running", 6),
+        ("SOLUSDT", "15M", "pending", 0),
+        ("BNBUSDT", "1H", "failed", 0),
+    ]:
+        store.upsert_market_kline_backfill_task(
+            MarketKlineBackfillTask(
+                id=f"mkbf-{symbol}-{period}",
+                symbol=symbol,
+                period=period,
+                targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+                targetEnd=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+                nextStart=datetime(2026, 6, 1, 6, 0, 0, tzinfo=timezone.utc).isoformat(),
+                status=status,
+                pagesFetched=2,
+                storedCandles=stored,
+                lastError="network timeout" if status == "failed" else "",
+                createdAt=now_iso,
+                updatedAt=now_iso,
+            )
+        )
+    store.upsert_market_candles(
+        "BTCUSDT",
+        "5M",
+        market_candles(10.0, count=2, start=datetime(2026, 6, 1, 11, 50, 0, tzinfo=timezone.utc), step_minutes=5),
+    )
+    store_module._market_kline_collection_state["lastTriggeredAt"] = now_iso
+    store_module._market_kline_collection_state["lastStoredCandles"] = 5
+    store_module._market_kline_collection_state["lastSkippedPairs"] = 3
+    store_module._market_kline_cleanup_state["lastCleanupDate"] = "2026-06-01"
+    store_module._market_kline_cleanup_state["lastDeletedCandles"] = 7
+
+    response = client.get("/api/market/kline-status", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overallStatus"] == "warning"
+    assert body["activePhase"] == "历史补齐"
+    assert body["cards"][0]["name"] == "K线历史补齐"
+    assert body["cards"][0]["progressCurrent"] == 1
+    assert body["cards"][0]["progressTotal"] == 4
+    assert body["cards"][1]["primaryMetric"] == "写入 5 根"
+    assert body["cards"][1]["secondaryMetric"] == "跳过 3 个组合"
+    five_minute = next(item for item in body["periodProgress"] if item["period"] == "5M")
+    assert five_minute["completed"] == 1
+    assert five_minute["running"] == 1
+    assert len(body["runningTasks"]) == 1
+    assert body["runningTasks"][0]["symbol"] == "ETHUSDT"
+    coverage = next(item for item in body["coverage"] if item["period"] == "5M")
+    assert coverage["rows"] == 2
+    assert coverage["symbols"] == 1
+    assert any("失败任务 1 个" in risk for risk in body["risks"])
+
+
+def test_market_kline_status_reads_persisted_coverage_snapshot(monkeypatch):
+    headers = auth_headers("kline-status-snapshot@example.com")
+    store.refresh_market_kline_coverage_snapshot("5M", datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc))
+
+    def fail_full_scan(*args, **kwargs):
+        raise AssertionError("status endpoint must not scan market_klines for coverage")
+
+    monkeypatch.setattr(store, "_scan_market_kline_coverage", fail_full_scan)
+
+    response = client.get("/api/market/kline-status", headers=headers)
+
+    assert response.status_code == 200
+    coverage = next(item for item in response.json()["coverage"] if item["period"] == "5M")
+    assert coverage["rows"] == 0
+    assert coverage["symbols"] == 0
+    assert coverage["status"] == "empty"
+
+
+def test_upsert_market_candles_refreshes_coverage_snapshot():
+    store.upsert_market_candles(
+        "FASTUSDT",
+        "1D",
+        market_candles(10.0, count=2, start=datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc), step_minutes=1440),
+    )
+
+    snapshot = store.market_kline_coverage_snapshot()
+    one_day = next(item for item in snapshot if item.period == "1D")
+
+    assert one_day.rows == 2
+    assert one_day.symbols == 1
+    assert one_day.earliestOpenTime == datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert one_day.latestOpenTime == datetime(2026, 6, 2, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+
+
+def test_coverage_snapshot_scheduler_refreshes_one_missing_period(monkeypatch):
+    refreshed: list[str] = []
+
+    def fake_refresh(period: str, now: datetime | None = None):
+        refreshed.append(period)
+        return MarketKlineCoverage(
+            period=period,
+            rows=0,
+            symbols=0,
+            targetWindow="30天",
+            status="empty",
+            statusLabel="暂无数据",
+        )
+
+    monkeypatch.setattr(store, "refresh_market_kline_coverage_snapshot", fake_refresh)
+
+    result = store_module.run_market_kline_coverage_snapshot_scheduler_tick(store)
+
+    assert result == "5M"
+    assert refreshed == ["5M"]
+
+
+def test_upsert_market_candles_does_not_prune_old_klines():
+    old_candles = market_candles(
+        7.0,
+        count=2,
+        start=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        step_minutes=60,
+    )
+
+    store.upsert_market_candles("OLDUSDT", "1H", old_candles)
+
+    assert len(store.latest_market_candles("OLDUSDT", "1H")) == 2
+
+
+def test_market_kline_cleanup_scheduler_runs_once_per_day():
+    old_candles = market_candles(
+        8.0,
+        count=3,
+        start=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        step_minutes=60,
+    )
+    store.upsert_market_candles("CLEANUSDT", "1H", old_candles)
+
+    first = store_module.run_market_kline_cleanup_scheduler_tick(
+        store,
+        datetime(2026, 6, 10, 2, 0, 0, tzinfo=timezone.utc),
+        batch_size=10,
+    )
+    second = store_module.run_market_kline_cleanup_scheduler_tick(
+        store,
+        datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc),
+        batch_size=10,
+    )
+
+    assert first["deletedCandles"] == 3
+    assert first["periods"]["1H"] == 3
+    assert second["deletedCandles"] == 0
+    assert second["skipped"] == "already_ran_today"
+
+
+def test_market_kline_cleanup_scheduler_deletes_in_batches():
+    old_candles = market_candles(
+        9.0,
+        count=5,
+        start=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        step_minutes=60,
+    )
+    store.upsert_market_candles("BATCHCLEANUSDT", "1H", old_candles)
+
+    result = store_module.run_market_kline_cleanup_scheduler_tick(
+        store,
+        datetime(2026, 6, 11, 2, 0, 0, tzinfo=timezone.utc),
+        batch_size=2,
+    )
+
+    assert result["deletedCandles"] == 2
+    assert len(store.latest_market_candles("BATCHCLEANUSDT", "1H")) == 3
+
+
+def test_market_kline_jobs_skip_while_cleanup_is_running(monkeypatch):
+    headers = auth_headers("cleanup-busy@example.com")
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["CLEANBUSYUSDT"])
+    seed_market_candles("CLEANBUSYUSDT", "1H", seed=4.2)
+    create_response = client.post(
+        "/api/strategies",
+        json={
+            "name": "K线清理中跳过策略",
+            "period": "1H",
+            "description": "K线清理未完成时不应启动扫描。",
+            "conditions": ["始终命中"],
+            "signalType": "趋势信号",
+            "score": 89,
+            "strengthGrade": "A",
+            "pythonCode": "def check_signal(candles):\n    return True",
+            "structuredConditions": [
+                {"title": "测试条件", "description": "始终命中", "parameters": ["根数: 240根"]}
+            ],
+            "aiAnalysis": ["测试K线清理锁"],
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 200
+
+    store_module._market_kline_cleanup_state["cleaning"] = True
+
+    try:
+        collection = store_module.run_market_kline_collection_scheduler_tick(
+            store,
+            datetime(2026, 6, 1, 11, 0, 30, tzinfo=timezone.utc),
+        )
+        backfill = store_module.run_market_kline_backfill_scheduler_tick(
+            store,
+            datetime(2026, 6, 1, 11, 0, 30, tzinfo=timezone.utc),
+        )
+        triggered = store_module.run_strategy_scheduler_tick(
+            store,
+            datetime(2026, 6, 1, 11, 0, 30, tzinfo=timezone.utc),
+        )
+    finally:
+        store_module._market_kline_cleanup_state["cleaning"] = False
+
+    assert collection["skipped"] == "cleanup_running"
+    assert backfill["skipped"] == "cleanup_running"
+    assert triggered == 0
+
+
+def test_scheduler_tick_skips_due_strategy_while_kline_backfill_is_running(monkeypatch):
+    headers = auth_headers("scheduler-backfill-busy@example.com")
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["BACKFILLUSDT"])
+    seed_market_candles("BACKFILLUSDT", "1H", seed=4.2)
+    create_response = client.post(
+        "/api/strategies",
+        json={
+            "name": "K线补齐中跳过策略",
+            "period": "1H",
+            "description": "历史补齐未完成时不应启动扫描。",
+            "conditions": ["始终命中"],
+            "signalType": "趋势信号",
+            "score": 89,
+            "strengthGrade": "A",
+            "pythonCode": "def check_signal(candles):\n    return True",
+            "structuredConditions": [
+                {"title": "测试条件", "description": "始终命中", "parameters": ["根数: 240根"]}
+            ],
+            "aiAnalysis": ["测试K线历史补齐锁"],
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 200
+
+    store_module._market_kline_backfill_state["backfilling"] = True
+
+    try:
+        triggered = store_module.run_strategy_scheduler_tick(store, datetime(2026, 6, 1, 11, 0, 30, tzinfo=timezone.utc))
+    finally:
+        store_module._market_kline_backfill_state["backfilling"] = False
+
+    assert triggered == 0
+    assert client.get("/api/strategies/run-status", headers=headers).json()["jobId"] == ""
+
+
+def test_market_klines_endpoint_returns_all_stored_candles_for_symbol_and_period():
+    headers = auth_headers("market-klines@example.com")
+    eth_15m = market_candles(10.0, count=12, step_minutes=15)
+    eth_1h = market_candles(20.0, count=5, step_minutes=60)
+    sol_15m = market_candles(30.0, count=7, step_minutes=15)
+    store.upsert_market_candles("ETHUSDT", "15M", eth_15m)
+    store.upsert_market_candles("ETHUSDT", "1H", eth_1h)
+    store.upsert_market_candles("SOLUSDT", "15M", sol_15m)
+
+    response = client.get("/api/market/klines/ethusdt?period=15M", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["time"] for item in body] == [candle.time for candle in eth_15m]
+    assert body[0]["close"] == eth_15m[0].close
+    assert len(body) == 12
+
+
+def test_market_radar_endpoint_scores_environment_and_recommends_symbols():
+    headers = auth_headers("market-radar@example.com")
+    base_time = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    store.upsert_market_candles(
+        "BTCUSDT",
+        "1H",
+        trend_candles(100.0, 0.45, count=40, volume=1200, volume_step=12, start=base_time),
+    )
+    store.upsert_market_candles(
+        "ETHUSDT",
+        "1H",
+        trend_candles(50.0, 0.25, count=40, volume=900, volume_step=9, start=base_time),
+    )
+    store.upsert_market_candles(
+        "SOLUSDT",
+        "1H",
+        trend_candles(20.0, 0.35, count=40, volume=800, volume_step=80, start=base_time),
+    )
+    store.upsert_market_candles(
+        "LINKUSDT",
+        "1H",
+        trend_candles(15.0, 0.12, count=40, volume=700, volume_step=12, start=base_time),
+    )
+    store.upsert_market_candles(
+        "DOGEUSDT",
+        "1H",
+        trend_candles(8.0, -0.08, count=40, volume=650, volume_step=0, start=base_time),
+    )
+
+    response = client.get("/api/market/radar", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["environment"]["score"] >= 60
+    assert body["environment"]["status"] in {"tradable", "watch_only"}
+    assert body["metrics"]["symbolsAnalyzed"] == 5
+    assert body["metrics"]["risingRatio"] > 50
+    assert body["recommendations"][0]["symbol"] == "SOLUSDT"
+    assert body["recommendations"][0]["score"] >= body["recommendations"][1]["score"]
+    assert body["recommendations"][0]["riskLevel"] in {"low", "medium", "high"}
+    assert body["opportunityGroups"]["breakout"] >= 1
+    assert body["updatedAt"]
+
+
+def test_run_strategy_uses_cached_market_candles_for_all_tradable_symbols(monkeypatch):
+    headers = auth_headers("market-runner@example.com")
+
+    def fail_fetch(symbol: str, period: str, limit: int = 240):
+        raise AssertionError("strategy scan must read cached K-lines instead of fetching Binance data")
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT", "SOLUSDT"])
+    monkeypatch.setattr(store_module, "fetch_market_candles", fail_fetch)
+    seed_market_candles("ETHUSDT", "1H", seed=2.0, count=24)
+    seed_market_candles("SOLUSDT", "1H", seed=2.5, count=24)
     create_response = client.post(
         "/api/strategies",
         json={
@@ -621,10 +1277,137 @@ def test_run_strategy_fetches_market_candles_for_all_tradable_symbols(monkeypatc
 
     assert run_response.status_code == 200
     body = run_response.json()
-    assert calls == [("ETHUSDT", "1H", 240), ("SOLUSDT", "1H", 240)]
     assert body["symbolsChecked"] == 2
     assert body["signalsCreated"] == 2
     assert {item["symbol"] for item in body["createdSignals"]} == {"ETHUSDT", "SOLUSDT"}
+
+
+def test_run_strategy_reuses_cached_candles_for_same_period_strategies(monkeypatch):
+    headers = auth_headers("grouped-scan@example.com")
+    read_calls = []
+    original_latest = store.latest_market_candles
+
+    def tracking_latest(symbol: str, period: str, limit: int = store_module.CLOSED_KLINE_LIMIT):
+        read_calls.append((symbol, period, limit))
+        return original_latest(symbol, period, limit)
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT", "SOLUSDT"])
+    monkeypatch.setattr(store, "latest_market_candles", tracking_latest)
+    seed_market_candles("ETHUSDT", "1H", seed=2.0, count=80)
+    seed_market_candles("SOLUSDT", "1H", seed=2.5, count=80)
+
+    for name, required in [("24根策略", 24), ("80根策略", 80)]:
+        response = client.post(
+            "/api/strategies",
+            json={
+                "name": name,
+                "period": "1H",
+                "description": f"需要 {required} 根 K 线。",
+                "conditions": [f"至少 {required} 根 K 线"],
+                "signalType": "趋势信号",
+                "score": 88,
+                "strengthGrade": "A",
+                "pythonCode": f"def check_signal(candles):\n    return len(candles) >= {required}",
+                "structuredConditions": [
+                    {"title": "测试条件", "description": "需要足够 K 线", "parameters": [f"根数: {required}根"]}
+                ],
+                "aiAnalysis": ["测试同周期复用K线"],
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+    run_response = client.post("/api/strategies/run-once", headers=headers)
+
+    assert run_response.status_code == 200
+    body = run_response.json()
+    assert body["symbolsChecked"] == 4
+    assert body["signalsCreated"] == 4
+    assert read_calls == [("ETHUSDT", "1H", 80), ("SOLUSDT", "1H", 80)]
+
+
+def test_async_strategy_run_reuses_cached_candles_for_same_period_strategies(monkeypatch):
+    headers = auth_headers("grouped-async-scan@example.com")
+    read_calls = []
+    original_latest = store.latest_market_candles
+
+    def tracking_latest(symbol: str, period: str, limit: int = store_module.CLOSED_KLINE_LIMIT):
+        read_calls.append((symbol, period, limit))
+        return original_latest(symbol, period, limit)
+
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT", "SOLUSDT"])
+    monkeypatch.setattr(store, "latest_market_candles", tracking_latest)
+    seed_market_candles("ETHUSDT", "1H", seed=2.0, count=80)
+    seed_market_candles("SOLUSDT", "1H", seed=2.5, count=80)
+
+    for name, required in [("异步24根策略", 24), ("异步80根策略", 80)]:
+        response = client.post(
+            "/api/strategies",
+            json={
+                "name": name,
+                "period": "1H",
+                "description": f"需要 {required} 根 K 线。",
+                "conditions": [f"至少 {required} 根 K 线"],
+                "signalType": "趋势信号",
+                "score": 88,
+                "strengthGrade": "A",
+                "pythonCode": f"def check_signal(candles):\n    return len(candles) >= {required}",
+                "structuredConditions": [
+                    {"title": "测试条件", "description": "需要足够 K 线", "parameters": [f"根数: {required}根"]}
+                ],
+                "aiAnalysis": ["测试异步同周期复用K线"],
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+    status = client.post("/api/strategies/run", headers=headers).json()
+    for _ in range(30):
+        if not status["running"]:
+            break
+        time.sleep(0.05)
+        status = client.get("/api/strategies/run-status", headers=headers).json()
+
+    assert status["scannedSymbols"] == 4
+    assert status["signalsCreated"] == 4
+    assert read_calls == [("ETHUSDT", "1H", 80), ("SOLUSDT", "1H", 80)]
+
+
+def test_strategy_run_skips_when_cached_candles_do_not_meet_strategy_requirement(monkeypatch):
+    headers = auth_headers("strategy-required-bars@example.com")
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["SHORTUSDT"])
+    seed_market_candles("SHORTUSDT", "1H", seed=2.8, count=24)
+
+    create_response = client.post(
+        "/api/strategies",
+        json={
+            "name": "80 根K线策略",
+            "period": "1H",
+            "description": "需要 80 根 K 线。",
+            "conditions": ["至少 80 根 K 线"],
+            "signalType": "趋势信号",
+            "score": 88,
+            "strengthGrade": "A",
+            "pythonCode": "def check_signal(candles):\n    return len(candles) >= 80",
+            "structuredConditions": [
+                {"title": "测试条件", "description": "需要足够 K 线", "parameters": ["根数: 80根"]}
+            ],
+            "aiAnalysis": ["测试策略所需根数"],
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 200
+
+    status = client.post("/api/strategies/run", headers=headers).json()
+    for _ in range(30):
+        if not status["running"]:
+            break
+        time.sleep(0.05)
+        status = client.get("/api/strategies/run-status", headers=headers).json()
+
+    assert status["signalsCreated"] == 0
+    assert status["skippedSymbols"] == 1
+    assert status["skipped"][0]["message"] == "需要 80 根完整K线，实际 24 根"
 
 
 def test_strategy_run_sends_pushover_for_created_signal(monkeypatch):
@@ -653,7 +1436,7 @@ def test_strategy_run_sends_pushover_for_created_signal(monkeypatch):
         headers=headers,
     )
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["PUSHUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", lambda symbol, period, limit=240: sample_candles(2.2, count=240))
+    seed_market_candles("PUSHUSDT", "1H", seed=2.2)
     monkeypatch.setattr(store_module.urllib.request, "urlopen", fake_urlopen)
 
     create_response = client.post(
@@ -689,14 +1472,8 @@ def test_strategy_run_sends_pushover_for_created_signal(monkeypatch):
 
 def test_strategy_run_skips_per_strategy_symbol_blacklist(monkeypatch):
     headers = auth_headers("strategy-blacklist@example.com")
-    calls = []
-
-    def fake_fetch(symbol: str, period: str, limit: int = 240):
-        calls.append((symbol, period, limit))
-        return sample_candles(2.5, count=240)
-
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["ETHUSDT", "ZKUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", fake_fetch)
+    seed_market_candles("ETHUSDT", "1H", seed=2.5)
     create_response = client.post(
         "/api/strategies",
         json={
@@ -730,7 +1507,6 @@ def test_strategy_run_skips_per_strategy_symbol_blacklist(monkeypatch):
         status = client.get("/api/strategies/run-status", headers=headers).json()
 
     assert status["running"] is False
-    assert calls == [("ETHUSDT", "1H", 240)]
     assert status["scannedSymbols"] == 2
     assert status["signalsCreated"] == 1
     assert status["skippedSymbols"] == 1
@@ -740,7 +1516,7 @@ def test_strategy_run_skips_per_strategy_symbol_blacklist(monkeypatch):
 def test_strategy_run_skips_symbols_with_insufficient_closed_klines(monkeypatch):
     headers = auth_headers("thin-history@example.com")
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["NEWUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", lambda symbol, period, limit=240: sample_candles(3.0, count=24))
+    seed_market_candles("NEWUSDT", "1H", seed=3.0, count=24)
     create_response = client.post(
         "/api/strategies",
         json={
@@ -800,10 +1576,172 @@ def test_fetch_market_candles_uses_only_closed_klines(monkeypatch):
     assert candles[-1].close == 1 + 239 / 100
 
 
+def test_fetch_market_candles_supports_short_intervals(monkeypatch):
+    captured_urls = []
+    rows = [
+        [1_800_000_000_000 + i * 300_000, "1", "2", "0.5", str(1 + i / 100), "100"]
+        for i in range(241)
+    ]
+
+    def fake_read(url: str, timeout: int):
+        captured_urls.append(url)
+        return store_module.json.dumps(rows)
+
+    monkeypatch.setattr(store_module, "_read_url_with_retry", fake_read)
+
+    assert len(store_module.fetch_market_candles("ethusdt", "5M")) == 240
+    assert len(store_module.fetch_market_candles("ethusdt", "15M")) == 240
+    assert "interval=5m" in captured_urls[0]
+    assert "interval=15m" in captured_urls[1]
+
+
+def test_latest_period_boundary_supports_short_intervals():
+    now = datetime(2026, 6, 1, 10, 17, 42, tzinfo=timezone.utc)
+
+    assert store_module._latest_period_boundary("5M", now) == datetime(2026, 6, 1, 10, 15, tzinfo=timezone.utc)
+    assert store_module._latest_period_boundary("15M", now) == datetime(2026, 6, 1, 10, 15, tzinfo=timezone.utc)
+    assert store_module._latest_period_boundary("1H", now) == datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+
+
+def test_market_kline_retention_cutoffs_match_required_windows():
+    now = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    cutoffs = store_module._market_kline_retention_cutoffs(now)
+
+    assert set(cutoffs) == {"5M", "15M", "1H", "4H", "1D"}
+    assert cutoffs["5M"] == "2026-05-02T00:00:00+00:00"
+    assert cutoffs["15M"] == "2026-05-02T00:00:00+00:00"
+    assert cutoffs["1H"] == "2026-05-02T00:00:00+00:00"
+    assert cutoffs["4H"] == "2026-05-02T00:00:00+00:00"
+    assert cutoffs["1D"] == "2025-06-01T00:00:00+00:00"
+
+
+def test_delete_old_signals_removes_only_items_older_than_retention_window():
+    old_signal = insert_sample_signal("sig-old-retention", "OLDUSDT")
+    recent_signal = insert_sample_signal("sig-recent-retention", "RECENTUSDT")
+    invalid_timestamp_signal = insert_sample_signal("sig-invalid-retention", "INVALIDUSDT")
+
+    store._upsert(
+        "signals",
+        old_signal.model_copy(update={"triggeredAt": "2026-04-30T12:00:00+00:00"}),
+        store._order_for_id("signals", old_signal.id),
+    )
+    store._upsert(
+        "signals",
+        recent_signal.model_copy(update={"triggeredAt": "2026-05-15T12:00:00+00:00"}),
+        store._order_for_id("signals", recent_signal.id),
+    )
+    store._upsert(
+        "signals",
+        invalid_timestamp_signal.model_copy(update={"triggeredAt": "not-a-date"}),
+        store._order_for_id("signals", invalid_timestamp_signal.id),
+    )
+
+    deleted = store.delete_old_signals(datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc), retention_days=30)
+
+    assert deleted == 1
+    remaining_ids = {signal.id for signal in store.signals}
+    assert old_signal.id not in remaining_ids
+    assert recent_signal.id in remaining_ids
+    assert invalid_timestamp_signal.id in remaining_ids
+
+
+def test_signal_cleanup_scheduler_tick_runs_once_per_day():
+    old_signal = insert_sample_signal("sig-old-scheduler", "SCHEDOLDUSDT")
+    store._upsert(
+        "signals",
+        old_signal.model_copy(update={"triggeredAt": "2026-04-30T12:00:00+00:00"}),
+        store._order_for_id("signals", old_signal.id),
+    )
+
+    first = store_module.run_signal_cleanup_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 1, 0, 0, tzinfo=timezone.utc),
+    )
+    second = store_module.run_signal_cleanup_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert first == 1
+    assert second == 0
+
+
+def test_signal_performance_scheduler_completes_tracking_and_saves_ai_lesson(monkeypatch):
+    headers = auth_headers("signal-review@example.com")
+    signal = insert_sample_signal("sig-performance-review", "REVIEWUSDT", "1H")
+    signal = signal.model_copy(
+        update={
+            "strategyId": "seed-strategy",
+            "strategyName": "AI复盘策略",
+            "triggeredAt": "2026-05-31T10:00:00+00:00",
+            "price": 100.0,
+        }
+    )
+    store._upsert("signals", signal, store._order_for_id("signals", signal.id))
+    store.upsert_market_candles(
+        "REVIEWUSDT",
+        "1H",
+        [
+            Candle(
+                time=(datetime(2026, 5, 31, 11, 0, 0, tzinfo=timezone.utc) + i * timedelta(hours=1)).isoformat(),
+                open=100 + i,
+                high=102 + i,
+                low=99 - i * 0.1,
+                close=101 + i,
+                volume=1000 + i * 20,
+                ma5=100 + i,
+                ma20=99 + i,
+                ma60=98 + i,
+            )
+            for i in range(25)
+        ],
+    )
+
+    def fake_review(*_args, **_kwargs):
+        return {
+            "result": "effective",
+            "summary": "24小时内延续上涨，信号有效。",
+            "analysis": "触发后价格逐步抬高，最大浮盈明显高于最大回撤。",
+            "failureReason": "",
+            "effectivePattern": "突破后持续站稳并放量。",
+            "improvementIdeas": ["继续保留趋势确认条件", "观察回撤是否扩大"],
+            "suggestedRuleChanges": [{"type": "keep_condition", "description": "保留 MA20 上方确认"}],
+            "confidence": 0.82,
+        }
+
+    monkeypatch.setattr(store_module, "_call_llm_for_signal_review", fake_review, raising=False)
+
+    result = store_module.run_signal_performance_scheduler_tick(
+        store,
+        datetime(2026, 6, 1, 11, 30, 0, tzinfo=timezone.utc),
+    )
+
+    performance = store.performance_for_signal(signal.id)
+    lessons = store.lessons_for_strategy(signal.strategyId)
+    detail = client.get(f"/api/signals/{signal.id}", headers=headers).json()
+
+    assert result["tracked"] == 1
+    assert result["reviewed"] == 1
+    assert result["lessonsCreated"] == 1
+    assert performance is not None
+    assert performance.status == "completed"
+    assert performance.reviewStatus == "generated"
+    assert performance.reviewResult == "effective"
+    assert performance.change1hPct == pytest.approx(1.0)
+    assert performance.change4hPct == pytest.approx(4.0)
+    assert performance.change24hPct == pytest.approx(24.0)
+    assert performance.maxGainPct == pytest.approx(25.0)
+    assert performance.maxDrawdownPct == pytest.approx(-3.3)
+    assert lessons[0].signalId == signal.id
+    assert lessons[0].result == "effective"
+    assert lessons[0].confidence == pytest.approx(0.82)
+    assert detail["performance"]["reviewSummary"] == "24小时内延续上涨，信号有效。"
+
+
 def test_scheduler_tick_starts_due_strategy_run(monkeypatch):
     headers = auth_headers("scheduler@example.com")
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["DUEUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", lambda symbol, period, limit=240: sample_candles(4.0, count=240))
+    seed_market_candles("DUEUSDT", "1H", seed=4.0)
     create_response = client.post(
         "/api/strategies",
         json={
@@ -839,10 +1777,61 @@ def test_scheduler_tick_starts_due_strategy_run(monkeypatch):
     assert client.get("/api/strategies/scheduler-status", headers=headers).json()["lastTriggeredAt"]
 
 
+def test_scheduler_tick_skips_due_strategy_while_kline_collection_is_running(monkeypatch):
+    headers = auth_headers("scheduler-kline-busy@example.com")
+    monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["BUSYUSDT"])
+    seed_market_candles("BUSYUSDT", "1H", seed=4.2)
+    create_response = client.post(
+        "/api/strategies",
+        json={
+            "name": "K线采集中跳过策略",
+            "period": "1H",
+            "description": "K线采集未完成时不应启动扫描。",
+            "conditions": ["始终命中"],
+            "signalType": "趋势信号",
+            "score": 89,
+            "strengthGrade": "A",
+            "pythonCode": "def check_signal(candles):\n    return True",
+            "structuredConditions": [
+                {"title": "测试条件", "description": "始终命中", "parameters": ["根数: 240根"]}
+            ],
+            "aiAnalysis": ["测试K线采集锁"],
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 200
+
+    store_module._market_kline_collection_state["collecting"] = True
+
+    try:
+        triggered = store_module.run_strategy_scheduler_tick(store, datetime(2026, 6, 1, 11, 0, 30, tzinfo=timezone.utc))
+    finally:
+        store_module._market_kline_collection_state["collecting"] = False
+
+    assert triggered == 0
+    assert client.get("/api/strategies/run-status", headers=headers).json()["jobId"] == ""
+
+
+def test_manual_strategy_run_returns_not_running_while_kline_collection_is_running():
+    headers = auth_headers("manual-kline-busy@example.com")
+    store_module._market_kline_collection_state["collecting"] = True
+
+    try:
+        response = client.post("/api/strategies/run", headers=headers)
+    finally:
+        store_module._market_kline_collection_state["collecting"] = False
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["running"] is False
+    assert body["errorsCount"] == 1
+    assert body["errors"][0]["errorType"] == "K线更新中"
+
+
 def test_scheduler_uses_period_boundary_instead_of_last_run_interval(monkeypatch):
     headers = auth_headers("scheduler-boundary@example.com")
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["BOUNDARYUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", lambda symbol, period, limit=240: sample_candles(4.5, count=240))
+    seed_market_candles("BOUNDARYUSDT", "1H", seed=4.5)
     create_response = client.post(
         "/api/strategies",
         json={
@@ -889,7 +1878,7 @@ def test_scheduler_uses_period_boundary_instead_of_last_run_interval(monkeypatch
 def test_strategy_run_history_lists_recent_completed_scans(monkeypatch):
     headers = auth_headers("history@example.com")
     monkeypatch.setattr(store_module, "fetch_tradable_symbols", lambda: ["HISTORYUSDT"])
-    monkeypatch.setattr(store_module, "fetch_market_candles", lambda symbol, period, limit=240: sample_candles(5.0, count=240))
+    seed_market_candles("HISTORYUSDT", "1H", seed=5.0)
     create_response = client.post(
         "/api/strategies",
         json={

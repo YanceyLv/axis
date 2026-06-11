@@ -4,6 +4,8 @@ import { AppShell, type ViewKey } from "./components/AppShell";
 import { AuthPage } from "./pages/AuthPage";
 import { Dashboard } from "./pages/Dashboard";
 import { KnowledgeCase } from "./pages/KnowledgeCase";
+import { MarketDataStatus } from "./pages/MarketDataStatus";
+import { MarketRadar } from "./pages/MarketRadar";
 import { NewCoins } from "./pages/NewCoins";
 import { SignalDetail } from "./pages/SignalDetail";
 import { Signals } from "./pages/Signals";
@@ -19,6 +21,8 @@ import type {
   DashboardSummary,
   GeneratedStrategy,
   KnowledgeCase as KnowledgeCaseType,
+  MarketKlineStatusResponse,
+  MarketRadarResponse,
   NewCoinListing,
   Period,
   Signal,
@@ -47,6 +51,11 @@ export default function App() {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
+  const [marketKlineStatus, setMarketKlineStatus] = useState<MarketKlineStatusResponse | null>(null);
+  const [marketKlineStatusLoading, setMarketKlineStatusLoading] = useState(false);
+  const [marketKlineAutoRefresh, setMarketKlineAutoRefresh] = useState(true);
+  const [marketRadar, setMarketRadar] = useState<MarketRadarResponse | null>(null);
+  const [marketRadarLoading, setMarketRadarLoading] = useState(false);
   const [newCoins, setNewCoins] = useState<NewCoinListing[]>([]);
   const [selectedSignalDetail, setSelectedSignalDetail] = useState<Signal | null>(null);
   const [watchlist, setWatchlist] = useState<WatchItem[]>([]);
@@ -276,6 +285,30 @@ export default function App() {
     return result;
   }
 
+  async function handleRefreshMarketRadar() {
+    setMarketRadarLoading(true);
+    setError(null);
+    try {
+      setMarketRadar(await api.marketRadar());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载市场雷达失败");
+    } finally {
+      setMarketRadarLoading(false);
+    }
+  }
+
+  const handleRefreshMarketKlineStatus = useCallback(async () => {
+    setMarketKlineStatusLoading(true);
+    setError(null);
+    try {
+      setMarketKlineStatus(await api.marketKlineStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载数据采集状态失败");
+    } finally {
+      setMarketKlineStatusLoading(false);
+    }
+  }, []);
+
   async function handleLoadStrategyRunStatus() {
     return api.strategyRunStatus();
   }
@@ -287,6 +320,24 @@ export default function App() {
   async function handleCancelStrategyRun() {
     return api.cancelStrategyRun();
   }
+
+  useEffect(() => {
+    if (!auth || view !== "market-data" || !marketKlineAutoRefresh) return;
+    const timer = window.setInterval(() => {
+      void handleRefreshMarketKlineStatus();
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [auth, view, marketKlineAutoRefresh, handleRefreshMarketKlineStatus]);
+
+  useEffect(() => {
+    if (!auth || view !== "market-radar" || marketRadar || marketRadarLoading) return;
+    void handleRefreshMarketRadar();
+  }, [auth, view, marketRadar, marketRadarLoading]);
+
+  useEffect(() => {
+    if (!auth || view !== "market-data" || marketKlineStatus || marketKlineStatusLoading) return;
+    void handleRefreshMarketKlineStatus();
+  }, [auth, view, marketKlineStatus, marketKlineStatusLoading, handleRefreshMarketKlineStatus]);
 
   async function handleStrategyRunFinished() {
     const [, nextSignals] = await Promise.all([
@@ -376,6 +427,25 @@ export default function App() {
     switch (view) {
       case "dashboard":
         return dashboard ? <Dashboard dashboard={dashboard} onOpenSignal={openSignal} onOpenWatch={openWatch} /> : null;
+      case "market-radar":
+        return (
+          <MarketRadar
+            radar={marketRadar}
+            loading={marketRadarLoading}
+            onRefresh={handleRefreshMarketRadar}
+            onCreateWatchItem={handleCreateWatchItem}
+          />
+        );
+      case "market-data":
+        return (
+          <MarketDataStatus
+            status={marketKlineStatus}
+            loading={marketKlineStatusLoading}
+            autoRefresh={marketKlineAutoRefresh}
+            onRefresh={handleRefreshMarketKlineStatus}
+            onToggleAutoRefresh={() => setMarketKlineAutoRefresh((value) => !value)}
+          />
+        );
       case "strategies":
         return (
           <Strategies
@@ -442,6 +512,8 @@ export default function App() {
 
 function intervalSecondsForPeriod(period: Period): number {
   const seconds: Record<Period, number> = {
+    "5M": 300,
+    "15M": 900,
     "1H": 3600,
     "4H": 14400,
     "1D": 86400

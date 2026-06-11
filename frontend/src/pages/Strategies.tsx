@@ -15,6 +15,7 @@
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { extractStrategyErrorLine, splitCodeLines } from "../code-editor";
 import { formatDateMinute, formatDateTime } from "../data-format";
 import type { GeneratedStrategy, GeneratedStrategyCondition, Period, Strategy, StrategyRunProgress, StrategyRunResult, StrategyScanHistory } from "../types";
 
@@ -41,7 +42,7 @@ type PreviewTab = "summary" | "code" | "analysis";
 type BuilderAction = "generate" | "save" | null;
 type BuilderMode = "conditions" | "code";
 
-const periods: Period[] = ["1H", "4H", "1D"];
+const periods: Period[] = ["5M", "15M", "1H", "4H", "1D"];
 const exampleConditions = ["价格突破前高", "站上均线", "放量上涨", "回踩不破均线", "成交量萎缩", "多头排列", "RSI超买", "MACD金叉"];
 
 export function Strategies({ strategies, onToggleStrategy, onToggleStrategySchedule, onGenerateStrategy, onGenerateStrategyFromCode, onSaveGeneratedStrategy, onUpdateStrategy, onDeleteStrategy, onStartStrategyRun, onLoadStrategyRunStatus, onLoadStrategyRunHistory, onCancelStrategyRun, onStrategyRunFinished }: StrategiesProps) {
@@ -281,6 +282,7 @@ function StrategyDetailEditor({ strategy, onBack, onSave }: { strategy: Strategy
   const [analysisExpanded, setAnalysisExpanded] = useState(false);
   const [action, setAction] = useState<"save" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const errorLine = useMemo(() => extractStrategyErrorLine(error), [error]);
   const parsedBlacklist = parseSymbolBlacklist(blacklistText);
   const canEdit = !safeStrategy.enabled;
 
@@ -321,7 +323,7 @@ function StrategyDetailEditor({ strategy, onBack, onSave }: { strategy: Strategy
         <SymbolBlacklistEditor expanded={blacklistExpanded} value={blacklistText} parsedSymbols={parsedBlacklist} disabled={!canEdit || action !== null} onChange={setBlacklistText} onToggle={() => setBlacklistExpanded((current) => !current)} />
         <section className="strategy-analysis-compact"><button className="strategy-analysis-toggle" onClick={() => setAnalysisExpanded((current) => !current)} type="button"><BrainCircuit size={16} />AI 分析<span>{analysisExpanded ? "收起" : "展开"}</span></button>{analysisExpanded ? <div className="strategy-analysis-body">{safeStrategy.runtime.aiAnalysis.length ? safeStrategy.runtime.aiAnalysis.map((item, index) => <p key={`${item}-${index}`}>{item}</p>) : <p>暂无 AI 分析内容。</p>}</div> : null}</section>
       </div>
-      <section className="strategy-code-panel"><header><div><Code2 size={17} /><strong>Python 代码</strong></div><span>{canEdit ? "可手动编辑，保存时会执行扫描校验" : "运行中策略仅可查看"}</span></header><textarea className="ai-code-editor" disabled={!canEdit || action !== null} spellCheck={false} value={draft.runtime.code} onChange={(event) => setDraft((current) => ({ ...current, runtime: { ...current.runtime, code: event.target.value } }))} /></section>
+      <section className="strategy-code-panel"><header><div><Code2 size={17} /><strong>Python 代码</strong></div><span>{errorLine ? `第 ${errorLine} 行校验失败` : canEdit ? "可手动编辑，保存时会执行扫描校验" : "运行中策略仅可查看"}</span></header><CodeEditor ariaLabel="策略 Python 代码" disabled={!canEdit || action !== null} errorLine={errorLine} value={draft.runtime.code} onChange={(value) => { setError(null); setDraft((current) => ({ ...current, runtime: { ...current.runtime, code: value } })); }} /></section>
     </div>{error ? <p className="inline-error ai-page-error">{error}</p> : null}
   </div></section>;
 }
@@ -354,6 +356,7 @@ function StrategyBuilderPage({ mode, onBack, onGenerateStrategy, onGenerateStrat
   const [activeTab, setActiveTab] = useState<PreviewTab>("summary");
   const [action, setAction] = useState<BuilderAction>(null);
   const [error, setError] = useState<string | null>(null);
+  const errorLine = useMemo(() => extractStrategyErrorLine(error), [error]);
   const inputPanelRef = useRef<HTMLElement | null>(null);
   const validConditions = conditions.map((item) => item.trim()).filter(Boolean);
   const validCode = pythonCode.trim();
@@ -398,7 +401,7 @@ function StrategyBuilderPage({ mode, onBack, onGenerateStrategy, onGenerateStrat
       <div className="ai-section-title"><span>1</span>选择周期</div><label className="ai-field"><select value={period} disabled={busy} onChange={(event) => { setPeriod(event.target.value as Period); setGenerated(null); }}>{periods.map((item) => <option key={item} value={item}>{periodLabel(item)}</option>)}</select></label><p className="ai-field-note">策略将在所选周期 K 线上进行检测</p>
       {mode === "code" ? <>
         <div className="ai-divider" /><div className="ai-section-title"><span>2</span>粘贴 Python 策略代码 <Info size={15} /></div><div className="ai-inline-tip"><Info size={14} /> 大模型只生成名称、条件和分析；保存时会检查代码，但不会改写代码。</div>
-        <textarea className="ai-code-editor ai-paste-code-editor" spellCheck={false} value={pythonCode} onChange={(event) => { setPythonCode(event.target.value); setGenerated(null); }} />
+        <CodeEditor ariaLabel="粘贴 Python 策略代码" className="ai-paste-code-editor" disabled={busy} errorLine={errorLine} value={pythonCode} onChange={(value) => { setPythonCode(value); setGenerated(null); setError(null); }} />
       </> : <>
         <div className="ai-divider" /><div className="ai-section-title"><span>2</span>输入自然语言条件 <Info size={15} /></div><div className="ai-inline-tip"><Info size={14} /> 请尽量描述清晰具体，AI 将生成结构化策略逻辑</div>
         <div className="ai-condition-list">{conditions.map((condition, index) => <div className="ai-condition-item" key={`condition-${index}`}><GripVertical size={17} /><strong>{index + 1}</strong><input disabled={busy} value={condition} onChange={(event) => setConditions((current) => current.map((item, i) => i === index ? event.target.value : item))} /><button className="icon-button danger" disabled={busy || conditions.length <= 1} onClick={() => setConditions((current) => current.filter((_, i) => i !== index))} type="button"><Trash2 size={16} /></button></div>)}</div>
@@ -409,10 +412,45 @@ function StrategyBuilderPage({ mode, onBack, onGenerateStrategy, onGenerateStrat
     </section><section className="ai-preview-workbench has-result"><div className="ai-result-preview">
       <header className="ai-result-header"><div><h2>策略预览</h2><span>{generated ? "AI 已生成结构化信息，以下内容可预览" : mode === "code" ? "请先粘贴代码并点击解析" : "请先输入条件并点击生成策略"}</span></div>{generated ? <div className="ai-result-actions"><GenerationBadge generated={generated} /><button className="secondary compact" disabled={busy} onClick={() => void handleGenerate(true)} type="button"><RefreshCw size={15} />重新生成</button></div> : null}</header>
       {generated?.generationSource === "fallback" ? <div className="generation-error">大模型未生效，已使用本地兜底结果。{generated.generationError ? `原因：${generated.generationError}` : "原因：大模型未返回可解析结果。"}</div> : null}
-      {generated ? <><nav className="ai-preview-tabs" aria-label="策略预览标签">{[{ key: "summary" as PreviewTab, label: "策略与条件", icon: ListChecks }, { key: "code" as PreviewTab, label: "Python 代码", icon: Code2 }, { key: "analysis" as PreviewTab, label: "AI 分析", icon: BrainCircuit }].map((tab) => { const Icon = tab.icon; return <button className={activeTab === tab.key ? "active" : ""} key={tab.key} onClick={() => setActiveTab(tab.key)} type="button"><Icon size={16} />{tab.label}</button>; })}</nav>{activeTab === "summary" ? <StrategyGeneratedSummary generated={generated} codeLocked={mode === "code"} onParameterChange={updateGeneratedParameter} /> : null}{activeTab === "code" ? <textarea className="ai-code-editor" readOnly spellCheck={false} value={generated.pythonCode} /> : null}{activeTab === "analysis" ? <AnalysisPreview generated={generated} /> : null}</> : <div className="ai-empty-preview"><h2>策略预览</h2><div className="empty-illustration"><div /><Sparkles size={42} /></div><strong>{mode === "code" ? "请先粘贴代码并点击“解析代码生成策略”" : "请先输入条件并点击“生成策略”"}</strong><p>{mode === "code" ? "AI 将读取代码并生成名称、结构化条件和分析，代码会原样保留" : "AI 将自动生成策略总结、结构化条件和信号强度评估"}</p></div>}
+      {generated ? <><nav className="ai-preview-tabs" aria-label="策略预览标签">{[{ key: "summary" as PreviewTab, label: "策略与条件", icon: ListChecks }, { key: "code" as PreviewTab, label: "Python 代码", icon: Code2 }, { key: "analysis" as PreviewTab, label: "AI 分析", icon: BrainCircuit }].map((tab) => { const Icon = tab.icon; return <button className={activeTab === tab.key ? "active" : ""} key={tab.key} onClick={() => setActiveTab(tab.key)} type="button"><Icon size={16} />{tab.label}</button>; })}</nav>{activeTab === "summary" ? <StrategyGeneratedSummary generated={generated} codeLocked={mode === "code"} onParameterChange={updateGeneratedParameter} /> : null}{activeTab === "code" ? <CodeEditor ariaLabel="生成的 Python 代码" errorLine={errorLine} readOnly value={generated.pythonCode} /> : null}{activeTab === "analysis" ? <AnalysisPreview generated={generated} /> : null}</> : <div className="ai-empty-preview"><h2>策略预览</h2><div className="empty-illustration"><div /><Sparkles size={42} /></div><strong>{mode === "code" ? "请先粘贴代码并点击“解析代码生成策略”" : "请先输入条件并点击“生成策略”"}</strong><p>{mode === "code" ? "AI 将读取代码并生成名称、结构化条件和分析，代码会原样保留" : "AI 将自动生成策略总结、结构化条件和信号强度评估"}</p></div>}
     </div></section></div>
     <footer className="ai-workspace-footer"><span><Info size={15} /> 提示：生成的策略仅供参考，请结合实际市场情况进行验证和调整</span><div><button className="secondary" disabled={busy} onClick={onBack} type="button">取消</button><button className="primary" disabled={!canSave} onClick={() => void handleSave()} type="button"><Save size={17} />{action === "save" ? "保存中..." : "保存策略"}</button></div></footer>{error ? <p className="inline-error ai-page-error">{error}</p> : null}
   </div></section>;
+}
+
+function CodeEditor({ ariaLabel, className = "", disabled = false, errorLine = null, readOnly = false, value, onChange }: { ariaLabel: string; className?: string; disabled?: boolean; errorLine?: number | null; readOnly?: boolean; value: string; onChange?: (value: string) => void }) {
+  const lines = splitCodeLines(value);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!errorLine || !textareaRef.current) return;
+    const lineHeight = Number.parseFloat(window.getComputedStyle(textareaRef.current).lineHeight) || 22;
+    textareaRef.current.scrollTop = Math.max(0, (errorLine - 1) * lineHeight - lineHeight * 3);
+    if (gutterRef.current) gutterRef.current.scrollTop = textareaRef.current.scrollTop;
+  }, [errorLine]);
+
+  return <div className={`code-editor-shell ${className} ${errorLine ? "has-error-line" : ""}`}>
+    <div className="code-editor-gutter" ref={gutterRef} aria-hidden="true">
+      {lines.map((_, index) => {
+        const lineNumber = index + 1;
+        return <span className={lineNumber === errorLine ? "active" : ""} key={`line-${lineNumber}`}>{lineNumber}</span>;
+      })}
+    </div>
+    <textarea
+      aria-label={ariaLabel}
+      className="code-editor-textarea"
+      disabled={disabled}
+      readOnly={readOnly}
+      ref={textareaRef}
+      spellCheck={false}
+      value={value}
+      onChange={(event) => onChange?.(event.target.value)}
+      onScroll={(event) => {
+        if (gutterRef.current) gutterRef.current.scrollTop = event.currentTarget.scrollTop;
+      }}
+    />
+  </div>;
 }
 
 function StrategyGeneratedSummary({ generated, codeLocked = false, onParameterChange }: { generated: GeneratedStrategy; codeLocked?: boolean; onParameterChange: (conditionIndex: number, parameterIndex: number, value: string) => void }) {
@@ -555,6 +593,6 @@ def check_signal(candles):
 
 function formatPythonNumber(value: number): string { return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/, "").replace(/\.$/, ""); }
 function runtimeStatusLabel(status: Strategy["schedule"]["lastStatus"]): string { const labels: Record<Strategy["schedule"]["lastStatus"], string> = { idle: "未运行", success: "成功", error: "失败" }; return labels[status]; }
-function periodLabel(period: Period): string { const labels: Record<Period, string> = { "1H": "1小时 (1H)", "4H": "4小时 (4H)", "1D": "1天 (1D)" }; return labels[period]; }
-function intervalSecondsForPeriod(period: Period): number { const seconds: Record<Period, number> = { "1H": 3600, "4H": 14400, "1D": 86400 }; return seconds[period]; }
-function intervalLabel(period: Period): string { const labels: Record<Period, string> = { "1H": "1小时", "4H": "4小时", "1D": "1天" }; return labels[period]; }
+function periodLabel(period: Period): string { const labels: Record<Period, string> = { "5M": "5分钟 (5M)", "15M": "15分钟 (15M)", "1H": "1小时 (1H)", "4H": "4小时 (4H)", "1D": "1天 (1D)" }; return labels[period]; }
+function intervalSecondsForPeriod(period: Period): number { const seconds: Record<Period, number> = { "5M": 300, "15M": 900, "1H": 3600, "4H": 14400, "1D": 86400 }; return seconds[period]; }
+function intervalLabel(period: Period): string { const labels: Record<Period, string> = { "5M": "5分钟", "15M": "15分钟", "1H": "1小时", "4H": "4小时", "1D": "1天" }; return labels[period]; }

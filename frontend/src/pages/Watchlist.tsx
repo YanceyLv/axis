@@ -10,7 +10,7 @@ interface WatchlistProps {
   onCreateWatchItem: (payload: CreateWatchItemPayload) => Promise<void>;
 }
 
-const periods: Period[] = ["1H", "4H", "1D"];
+const periods: Period[] = ["5M", "15M", "1H", "4H", "1D"];
 
 export function Watchlist({ watchlist, onOpenWatch, onCreateWatchItem }: WatchlistProps) {
   const [modalOpen, setModalOpen] = useState(false);

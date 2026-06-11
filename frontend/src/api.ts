@@ -3,9 +3,12 @@ import type {
   CreateWatchItemPayload,
   AuthResponse,
   AppSettings,
+  Candle,
   DashboardSummary,
   GeneratedStrategy,
   KnowledgeCase,
+  MarketKlineStatusResponse,
+  MarketRadarResponse,
   NewCoinListing,
   NewCoinScanResult,
   Period,
@@ -178,6 +181,10 @@ export const api = {
     }).then(normalizeStrategy),
   signals: () => request<Signal[]>("/api/signals"),
   signal: (id: string) => request<Signal>(`/api/signals/${id}`),
+  marketKlines: (symbol: string, period: Period) =>
+    request<Candle[]>(`/api/market/klines/${encodeURIComponent(symbol)}?period=${encodeURIComponent(period)}`),
+  marketKlineStatus: () => request<MarketKlineStatusResponse>("/api/market/kline-status"),
+  marketRadar: () => request<MarketRadarResponse>("/api/market/radar"),
   watchlist: () => request<WatchItem[]>("/api/watchlist"),
   watchItem: (id: string) => request<WatchItem>(`/api/watchlist/${id}`),
   createWatchItem: (payload: CreateWatchItemPayload) =>

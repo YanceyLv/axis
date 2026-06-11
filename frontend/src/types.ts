@@ -1,4 +1,4 @@
-export type Period = "1H" | "4H" | "1D";
+export type Period = "5M" | "15M" | "1H" | "4H" | "1D";
 export type StrengthGrade = "S" | "A" | "B" | "C";
 export type WatchStatus = "pending" | "matched" | "unmatched";
 
@@ -194,6 +194,114 @@ export interface NewCoinScanResult {
   listings: NewCoinListing[];
 }
 
+export interface MarketRadarEnvironment {
+  score: number;
+  status: "tradable" | "watch_only" | "avoid";
+  label: string;
+  summary: string;
+  notes: string[];
+}
+
+export interface MarketRadarMetrics {
+  symbolsAnalyzed: number;
+  risingRatio: number;
+  volumeExpansionRatio: number;
+  strongTrendRatio: number;
+  averageVolatility: number;
+  majorTrend: string;
+}
+
+export interface MarketRadarRecommendation {
+  symbol: string;
+  category: "breakout" | "pullback" | "volume_start" | "watch";
+  score: number;
+  period: Period;
+  trend: string;
+  volume: string;
+  riskLevel: "low" | "medium" | "high";
+  changePct: number;
+  volumeRatio: number;
+  volatilityPct: number;
+  reason: string;
+  riskNote: string;
+}
+
+export interface MarketRadarResponse {
+  updatedAt: string;
+  environment: MarketRadarEnvironment;
+  metrics: MarketRadarMetrics;
+  opportunityGroups: Record<MarketRadarRecommendation["category"], number>;
+  recommendations: MarketRadarRecommendation[];
+}
+
+export interface MarketKlineTaskCard {
+  name: string;
+  status: "running" | "waiting" | "completed" | "warning";
+  statusLabel: string;
+  phase: string;
+  progressCurrent: number | null;
+  progressTotal: number | null;
+  progressPercent: number | null;
+  primaryMetric: string;
+  secondaryMetric: string;
+  lastRunAt: string | null;
+  lastError: string;
+}
+
+export interface MarketKlinePeriodProgress {
+  period: Period;
+  total: number;
+  completed: number;
+  running: number;
+  pending: number;
+  failed: number;
+  progressPercent: number;
+}
+
+export interface MarketKlineCoverage {
+  period: Period;
+  rows: number;
+  symbols: number;
+  targetWindow: string;
+  earliestOpenTime: string | null;
+  latestOpenTime: string | null;
+  status: "normal" | "empty";
+  statusLabel: string;
+}
+
+export interface MarketKlineRunningTask {
+  symbol: string;
+  period: Period;
+  pagesFetched: number;
+  storedCandles: number;
+  nextStart: string;
+  targetEnd: string;
+  updatedAt: string;
+  lastError: string;
+}
+
+export interface MarketKlineRecentTask {
+  type: "backfill" | "incremental" | "cleanup";
+  status: string;
+  target: string;
+  amount: string;
+  updatedAt: string | null;
+  note: string;
+}
+
+export interface MarketKlineStatusResponse {
+  updatedAt: string;
+  overallStatus: "running" | "waiting" | "completed" | "warning";
+  overallStatusLabel: string;
+  activePhase: string;
+  cards: MarketKlineTaskCard[];
+  periodProgress: MarketKlinePeriodProgress[];
+  coverage: MarketKlineCoverage[];
+  runningTasks: MarketKlineRunningTask[];
+  recentTasks: MarketKlineRecentTask[];
+  risks: string[];
+}
+
 export interface AuthUser {
   id: string;
   email: string;
@@ -253,6 +361,36 @@ export interface Signal {
   analysis: string[];
   strengthGrade: StrengthGrade;
   candles: Candle[];
+  performance?: SignalPerformance | null;
+}
+
+export interface SignalPerformance {
+  id: string;
+  signalId: string;
+  symbol: string;
+  period: Period;
+  strategyId: string;
+  strategyName: string;
+  entryPrice: number;
+  status: "tracking" | "completed" | "insufficient_data";
+  trackingPeriod: Period;
+  change1hPct: number | null;
+  change4hPct: number | null;
+  change24hPct: number | null;
+  maxGainPct: number | null;
+  maxDrawdownPct: number | null;
+  bestPrice: number | null;
+  worstPrice: number | null;
+  evaluatedUntil: string | null;
+  reviewStatus: "pending" | "generated" | "failed" | "skipped";
+  reviewResult: "effective" | "weak" | "failed" | "insufficient_data" | null;
+  reviewSummary: string;
+  reviewAnalysis: string;
+  reviewSuggestions: string[];
+  reviewGeneratedAt: string | null;
+  reviewSource: "rules" | "llm";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface WatchCondition {

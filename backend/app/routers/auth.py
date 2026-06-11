@@ -1,5 +1,3 @@
-import sqlite3
-
 from fastapi import APIRouter
 
 from app.errors import ApiError
@@ -14,8 +12,6 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 def register(payload: RegisterRequest) -> AuthResponse:
     try:
         user, token = store.create_user(payload.email, payload.password)
-    except sqlite3.IntegrityError:
-        raise _duplicate_email_error(payload.email) from None
     except Exception as exc:
         if _is_duplicate_email_error(exc):
             raise _duplicate_email_error(payload.email) from None

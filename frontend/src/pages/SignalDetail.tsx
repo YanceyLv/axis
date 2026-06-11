@@ -1,8 +1,10 @@
-import { Eye, Plus } from "lucide-react";
-import { KlineChart } from "../components/Charts";
+import { ChevronDown, ChevronRight, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { api } from "../api";
+import { MarketKlineChart } from "../components/MarketKlineChart";
 import { StrengthGrade } from "../components/StrengthGrade";
 import { formatDateTime, formatPrice } from "../data-format";
-import type { Signal } from "../types";
+import type { Candle, Period, Signal } from "../types";
 
 interface SignalDetailProps {
   signal: Signal | null;
@@ -12,6 +14,42 @@ interface SignalDetailProps {
 }
 
 export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }: SignalDetailProps) {
+  const [chartPeriod, setChartPeriod] = useState<Period>(signal?.period ?? "1H");
+  const [chartCandles, setChartCandles] = useState<Candle[]>(signal?.candles ?? []);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartError, setChartError] = useState("");
+  const [strategyInfoOpen, setStrategyInfoOpen] = useState(false);
+
+  useEffect(() => {
+    if (!signal) return;
+    setChartPeriod(signal.period);
+    setChartCandles(signal.candles);
+    setChartError("");
+  }, [signal?.id]);
+
+  useEffect(() => {
+    if (!signal) return;
+    let cancelled = false;
+    setChartLoading(true);
+    setChartError("");
+    api.marketKlines(signal.symbol, chartPeriod)
+      .then((candles) => {
+        if (cancelled) return;
+        setChartCandles(candles);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setChartError(error instanceof Error ? error.message : "K线加载失败");
+        setChartCandles(signal.candles);
+      })
+      .finally(() => {
+        if (!cancelled) setChartLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chartPeriod, signal]);
+
   if (!signal) {
     return (
       <section className="page">
@@ -27,6 +65,14 @@ export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }: 
         <div>
           <h1>{signal.symbol} 信号详情</h1>
           <p>{signal.summary}</p>
+          <div className="signal-detail-meta">
+            <span>{signal.period}</span>
+            <span>{signal.strategyName}</span>
+            <span>{signal.signalType}</span>
+            <span>触发价 {formatPrice(signal.price)}</span>
+            <span>{formatDateTime(signal.triggeredAt)}</span>
+            <StrengthGrade grade={signal.strengthGrade} score={signal.score} />
+          </div>
         </div>
         <div className="toolbar-actions">
           <button className="secondary" onClick={onBack} type="button">返回</button>
@@ -42,43 +88,121 @@ export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }: 
         </div>
       </header>
 
-      <div className="detail-layout">
-        <section className="panel chart-panel">
-          <div className="panel-title">
+      <section className="panel chart-panel signal-chart-panel">
+        <div className="panel-title">
+          <div>
             <h2>K线走势</h2>
-            <span className="muted">{signal.period} / {formatDateTime(signal.triggeredAt)}</span>
+            <span className="muted">{signal.symbol} / 数据库已存K线</span>
           </div>
-          <KlineChart candles={signal.candles} signalTime={signal.triggeredAt} />
-        </section>
-
-        <aside className="panel detail-side">
-          <div className="stat-block">
-            <span>触发价格</span>
-            <strong>{formatPrice(signal.price)}</strong>
+          <div className="period-switcher" role="tablist" aria-label="K线周期">
+            {periods.map((period) => (
+              <button
+                className={chartPeriod === period ? "active" : ""}
+                key={period}
+                onClick={() => setChartPeriod(period)}
+                type="button"
+              >
+                {period}
+              </button>
+            ))}
           </div>
-          <div className="stat-block">
-            <span>策略</span>
-            <strong>{signal.strategyName}</strong>
-          </div>
-          <div className="stat-block">
-            <span>类型</span>
-            <strong>{signal.signalType}</strong>
-          </div>
-          <StrengthGrade grade={signal.strengthGrade} score={signal.score} />
-        </aside>
-      </div>
+        </div>
+        <MarketKlineChart candles={chartCandles} signalTime={signal.triggeredAt} loading={chartLoading} />
+        {chartError ? (
+          <div className="inline-error">{chartError}，已显示信号保存时的 K 线。</div>
+        ) : null}
+      </section>
 
       <section className="panel">
         <div className="panel-title">
-          <h2>分析理由</h2>
-          <Eye size={18} aria-hidden="true" />
+          <h2>后续表现</h2>
+          <span className="muted">{signal.performance ? performanceStatusLabel(signal.performance.status) : "待追踪"}</span>
         </div>
-        <ul className="analysis-list">
-          {signal.analysis.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
+        {signal.performance ? (
+          <div className="performance-grid">
+            <div className="stat-block">
+              <span>1h</span>
+              <strong>{formatPercent(signal.performance.change1hPct)}</strong>
+            </div>
+            <div className="stat-block">
+              <span>4h</span>
+              <strong>{formatPercent(signal.performance.change4hPct)}</strong>
+            </div>
+            <div className="stat-block">
+              <span>24h</span>
+              <strong>{formatPercent(signal.performance.change24hPct)}</strong>
+            </div>
+            <div className="stat-block">
+              <span>最大浮盈</span>
+              <strong>{formatPercent(signal.performance.maxGainPct)}</strong>
+            </div>
+            <div className="stat-block">
+              <span>最大回撤</span>
+              <strong>{formatPercent(signal.performance.maxDrawdownPct)}</strong>
+            </div>
+            <div className="stat-block">
+              <span>评估到</span>
+              <strong>{signal.performance.evaluatedUntil ? formatDateTime(signal.performance.evaluatedUntil) : "--"}</strong>
+            </div>
+          </div>
+        ) : (
+          <p className="muted">后台会在 K 线数据更新后开始追踪该信号。</p>
+        )}
+      </section>
+
+      {signal.performance?.reviewStatus === "generated" ? (
+        <section className="panel">
+          <div className="panel-title">
+            <h2>AI 复盘</h2>
+            <span className="chip">{reviewResultLabel(signal.performance.reviewResult)}</span>
+          </div>
+          <p>{signal.performance.reviewSummary}</p>
+          <p className="muted">{signal.performance.reviewAnalysis}</p>
+          {signal.performance.reviewSuggestions.length ? (
+            <ul className="analysis-list">
+              {signal.performance.reviewSuggestions.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
+
+      <section className="panel strategy-note-panel">
+        <button className="strategy-note-toggle" onClick={() => setStrategyInfoOpen((value) => !value)} type="button">
+          {strategyInfoOpen ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+          <span>策略说明</span>
+        </button>
+        {strategyInfoOpen ? (
+          <ul className="analysis-list compact">
+            {signal.analysis.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        ) : null}
       </section>
     </section>
   );
+}
+
+const periods: Period[] = ["5M", "15M", "1H", "4H", "1D"];
+
+function performanceStatusLabel(status: NonNullable<Signal["performance"]>["status"]): string {
+  if (status === "completed") return "追踪完成";
+  if (status === "insufficient_data") return "数据不足";
+  return "追踪中";
+}
+
+function reviewResultLabel(result: NonNullable<Signal["performance"]>["reviewResult"]): string {
+  if (result === "effective") return "有效";
+  if (result === "weak") return "偏弱";
+  if (result === "failed") return "失败";
+  if (result === "insufficient_data") return "数据不足";
+  return "待复盘";
+}
+
+function formatPercent(value: number | null): string {
+  if (value === null) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
 }

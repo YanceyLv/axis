@@ -291,7 +291,7 @@ Frontend:
 ## Future Extension Points
 
 - Replace mock candle service with Binance/OKX adapters.
-- Replace in-memory store with SQLite or Postgres.
+- Replace in-memory store with MySQL.
 - Add a strategy scan scheduler.
 - Add real indicator calculations with pandas or a technical analysis library.
 - Add OpenAI-powered strategy generation and explanation.
