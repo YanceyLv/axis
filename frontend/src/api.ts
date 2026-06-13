@@ -7,6 +7,7 @@ import type {
   DashboardSummary,
   GeneratedStrategy,
   KnowledgeCase,
+  MarketKlineBackfillRetryResponse,
   MarketKlineStatusResponse,
   MarketRadarResponse,
   NewCoinListing,
@@ -181,9 +182,19 @@ export const api = {
     }).then(normalizeStrategy),
   signals: () => request<Signal[]>("/api/signals"),
   signal: (id: string) => request<Signal>(`/api/signals/${id}`),
-  marketKlines: (symbol: string, period: Period) =>
-    request<Candle[]>(`/api/market/klines/${encodeURIComponent(symbol)}?period=${encodeURIComponent(period)}`),
+  marketKlines: (symbol: string, period: Period, limit?: number) =>
+    request<Candle[]>(
+      `/api/market/klines/${encodeURIComponent(symbol)}?period=${encodeURIComponent(period)}${
+        typeof limit === "number" ? `&limit=${encodeURIComponent(String(limit))}` : ""
+      }`
+    ),
   marketKlineStatus: () => request<MarketKlineStatusResponse>("/api/market/kline-status"),
+  marketKlineBackfillRetry: (symbol: string, period: Period) =>
+    request<MarketKlineBackfillRetryResponse>("/api/market/kline-backfill/retry", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ symbol, period })
+    }),
   marketRadar: () => request<MarketRadarResponse>("/api/market/radar"),
   watchlist: () => request<WatchItem[]>("/api/watchlist"),
   watchItem: (id: string) => request<WatchItem>(`/api/watchlist/${id}`),
@@ -192,6 +203,11 @@ export const api = {
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload)
+    }),
+  deleteWatchItem: (id: string) =>
+    request<void>(`/api/watchlist/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: jsonHeaders
     }),
   knowledgeCase: (id: string) => request<KnowledgeCase>(`/api/knowledge/${id}`)
 };

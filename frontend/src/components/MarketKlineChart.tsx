@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import {
   CandlestickSeries,
   ColorType,
@@ -24,6 +24,7 @@ interface MarketKlineChartProps {
   candles: Candle[];
   signalTime?: string | null;
   loading?: boolean;
+  chartHeaderExtra?: ReactNode;
 }
 
 interface HoverInfo {
@@ -35,7 +36,7 @@ interface HoverInfo {
   volume: number;
 }
 
-export function MarketKlineChart({ candles, signalTime, loading = false }: MarketKlineChartProps) {
+export function MarketKlineChart({ candles, signalTime, loading = false, chartHeaderExtra }: MarketKlineChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -254,6 +255,7 @@ export function MarketKlineChart({ candles, signalTime, loading = false }: Marke
           <span>{validCandles.length} 根</span>
           <span>{dataRangeLabel}</span>
         </div>
+        {chartHeaderExtra ? <div className="market-chart-extra">{chartHeaderExtra}</div> : null}
       </div>
       <div className="market-chart" ref={containerRef} />
       {loading ? <div className="chart-overlay">正在加载 K 线...</div> : null}

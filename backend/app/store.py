@@ -34,7 +34,9 @@ from app.models import (
     KnowledgeCase,
     MarketKline,
     MarketKlineBackfillTask,
+    MarketKlineBackfillRetryResponse,
     MarketKlineCoverage,
+    MarketKlineFailedTask,
     MarketKlinePeriodProgress,
     MarketKlineRecentTask,
     MarketKlineRunningTask,
@@ -42,7 +44,8 @@ from app.models import (
     MarketKlineTaskCard,
     MarketRadarEnvironment,
     MarketRadarMetrics,
-    MarketRadarRecommendation,
+    MarketRadarSection,
+    MarketRadarSectionItem,
     MarketRadarResponse,
     NewCoinListing,
     NewCoinScanResult,
@@ -91,10 +94,20 @@ SETTINGS_TABLE = "settings"
 STRATEGY_GENERATION_CACHE_TABLE = "strategy_generation_cache"
 MARKET_KLINE_TABLE = "market_klines"
 MARKET_KLINE_COVERAGE_TABLE = "market_kline_coverage_snapshots"
+MARKET_RADAR_SNAPSHOT_TABLE = "market_radar_snapshots"
+MARKET_RADAR_SNAPSHOT_MAX_AGE_SECONDS = 600
 NEW_COIN_LISTINGS_TABLE = "new_coin_listings"
 SETTINGS_ID = "global"
 logger = logging.getLogger("axis.strategy_generation")
 new_coin_logger = logging.getLogger("axis.new_coin_detection")
+
+
+class MarketKlineBackfillRetryError(Exception):
+    def __init__(self, status_code: int, code: str, message: str, details: dict[str, str]) -> None:
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
 
 
 class Store(Protocol):
@@ -144,15 +157,21 @@ class Store(Protocol):
 
     def latest_market_candles(self, symbol: str, period: str, limit: int = CLOSED_KLINE_LIMIT) -> list[Candle]: ...
 
-    def market_candles_for_symbol_period(self, symbol: str, period: str) -> list[Candle]: ...
+    def market_candles_for_symbol_period(self, symbol: str, period: str, limit: int | None = None) -> list[Candle]: ...
 
     def market_kline_status(self) -> MarketKlineStatusResponse: ...
+
+    def retry_market_kline_backfill_task(self, symbol: str, period: str) -> MarketKlineBackfillRetryResponse: ...
 
     def market_kline_coverage_snapshot(self) -> list[MarketKlineCoverage]: ...
 
     def refresh_market_kline_coverage_snapshot(
         self, period: str, now: datetime | None = None
     ) -> MarketKlineCoverage: ...
+
+    def market_radar_snapshot(self, period: str = "1H") -> MarketRadarResponse | None: ...
+
+    def refresh_market_radar_snapshot(self, period: str = "1H", now: datetime | None = None) -> MarketRadarResponse: ...
 
     def market_radar(self) -> MarketRadarResponse: ...
 
@@ -179,6 +198,8 @@ class Store(Protocol):
     def scan_new_coin_listings(self) -> NewCoinScanResult: ...
 
     def create_watch_item(self, payload: CreateWatchItemRequest) -> WatchItem: ...
+
+    def delete_watch_item(self, watch_item_id: str) -> bool | None: ...
 
     def create_user(self, email: str, password: str) -> tuple[AuthUser, str]: ...
 
@@ -217,6 +238,7 @@ class MySQLStore:
                 cursor.execute(f"DELETE FROM {table}")
             cursor.execute(f"DELETE FROM `{MARKET_KLINE_TABLE}`")
             cursor.execute(f"DELETE FROM `{MARKET_KLINE_COVERAGE_TABLE}`")
+            cursor.execute(f"DELETE FROM `{MARKET_RADAR_SNAPSHOT_TABLE}`")
             cursor.execute(f"DELETE FROM `{USER_TABLE}`")
             cursor.execute(f"DELETE FROM `{SETTINGS_TABLE}`")
             cursor.execute(f"DELETE FROM `{STRATEGY_GENERATION_CACHE_TABLE}`")
@@ -253,6 +275,18 @@ class MySQLStore:
             cursor.execute(f"SELECT payload FROM `{MARKET_KLINE_COVERAGE_TABLE}`")
             rows = cursor.fetchall()
         return [MarketKlineCoverage.model_validate_json(_payload_text(row[0])) for row in rows]
+
+    def market_radar_snapshot(self, period: str = "1H") -> MarketRadarResponse | None:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"SELECT payload FROM `{MARKET_RADAR_SNAPSHOT_TABLE}` WHERE period = %s",
+                (str(period).upper(),),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return _load_market_radar_snapshot_payload(_payload_text(row[0]))
 
     def generate_strategy(self, period: str, conditions: list[str], force_refresh: bool = False) -> GeneratedStrategy:
         cache_key = _strategy_generation_cache_key(period, conditions)
@@ -399,6 +433,14 @@ class MySQLStore:
         )
         self._upsert("watch_items", watch_item, self._next_front_order("watch_items"))
         return watch_item
+
+    def delete_watch_item(self, watch_item_id: str) -> bool | None:
+        watch_item = self._get("watch_items", watch_item_id, WatchItem)
+        if watch_item is None:
+            return None
+
+        self._delete("watch_items", watch_item_id)
+        return True
 
     def create_user(self, email: str, password: str) -> tuple[AuthUser, str]:
         normalized_email = _normalize_email(email)
@@ -566,6 +608,15 @@ class MySQLStore:
             cursor.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS `{MARKET_KLINE_COVERAGE_TABLE}` (
+                    period VARCHAR(8) PRIMARY KEY,
+                    payload JSON NOT NULL,
+                    updated_at VARCHAR(40) NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS `{MARKET_RADAR_SNAPSHOT_TABLE}` (
                     period VARCHAR(8) PRIMARY KEY,
                     payload JSON NOT NULL,
                     updated_at VARCHAR(40) NOT NULL
@@ -960,20 +1011,102 @@ class MySQLStore:
 
         return [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in reversed(rows)]
 
-    def market_candles_for_symbol_period(self, symbol: str, period: str) -> list[Candle]:
+    def market_candles_for_symbol_period(self, symbol: str, period: str, limit: int | None = None) -> list[Candle]:
+        normalized_symbol = symbol.upper()
+        normalized_period = str(period).upper()
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            if limit is not None and limit > 0:
+                cursor.execute(
+                    f"""
+                    SELECT payload FROM `{MARKET_KLINE_TABLE}`
+                    WHERE symbol = %s AND period = %s
+                    ORDER BY open_time DESC
+                    LIMIT %s
+                    """,
+                    (normalized_symbol, normalized_period, int(limit)),
+                )
+            else:
+                cursor.execute(
+                    f"""
+                    SELECT payload FROM `{MARKET_KLINE_TABLE}`
+                    WHERE symbol = %s AND period = %s
+                    ORDER BY open_time ASC
+                    """,
+                    (normalized_symbol, normalized_period),
+                )
+            rows = cursor.fetchall()
+
+        candles = [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in rows]
+        ordered = list(reversed(candles)) if limit is not None and limit > 0 else candles
+        if normalized_period in MARKET_KLINE_DERIVED_PERIODS:
+            ordered = self._with_live_derived_market_candle(normalized_symbol, normalized_period, ordered)
+        if limit is not None and limit > 0:
+            return ordered[-int(limit):]
+        return ordered
+
+    def _with_live_derived_market_candle(self, symbol: str, period: str, candles: list[Candle]) -> list[Candle]:
+        expected_count = _period_seconds(period) // _period_seconds("5M")
+        if expected_count <= 1:
+            return candles
+
         with self._connect() as connection:
             cursor = connection.cursor()
             cursor.execute(
                 f"""
                 SELECT payload FROM `{MARKET_KLINE_TABLE}`
                 WHERE symbol = %s AND period = %s
-                ORDER BY open_time ASC
+                ORDER BY open_time DESC
+                LIMIT %s
                 """,
-                (symbol.upper(), str(period).upper()),
+                (symbol, "5M", int(expected_count)),
             )
             rows = cursor.fetchall()
 
-        return [MarketKline.model_validate_json(_payload_text(row[0])).candle for row in rows]
+        recent_five_minute = [
+            MarketKline.model_validate_json(_payload_text(row[0])).candle
+            for row in reversed(rows)
+        ]
+        if not recent_five_minute:
+            return candles
+
+        latest_time = _parse_datetime(recent_five_minute[-1].time)
+        if latest_time is None:
+            return candles
+
+        bucket_start = _floor_datetime_to_period(latest_time, period)
+        bucket_candles = [
+            candle
+            for candle in recent_five_minute
+            if (_parse_datetime(candle.time) or datetime.min.replace(tzinfo=timezone.utc)) >= bucket_start
+        ]
+        if not bucket_candles:
+            return candles
+
+        live_candle = Candle(
+            time=bucket_start.isoformat(),
+            open=bucket_candles[0].open,
+            high=max(candle.high for candle in bucket_candles),
+            low=min(candle.low for candle in bucket_candles),
+            close=bucket_candles[-1].close,
+            volume=sum(candle.volume for candle in bucket_candles),
+            ma5=0,
+            ma20=0,
+            ma60=0,
+        )
+
+        merged = list(candles)
+        if merged:
+            latest_stored_time = _parse_datetime(merged[-1].time)
+            if latest_stored_time is not None and _floor_datetime_to_period(latest_stored_time, period) == bucket_start:
+                merged[-1] = live_candle
+            elif latest_stored_time is None or bucket_start > latest_stored_time:
+                merged.append(live_candle)
+        else:
+            merged.append(live_candle)
+
+        _populate_moving_averages(merged)
+        return merged
 
     def market_kline_status(self) -> MarketKlineStatusResponse:
         now = datetime.now(timezone.utc)
@@ -1014,8 +1147,31 @@ class MySQLStore:
                 reverse=True,
             )[:8]
         ]
+        failed_task_items = [
+            MarketKlineFailedTask(
+                symbol=task.symbol,
+                period=task.period,
+                pagesFetched=task.pagesFetched,
+                storedCandles=task.storedCandles,
+                nextStart=task.nextStart,
+                targetEnd=task.targetEnd,
+                updatedAt=task.updatedAt,
+                lastError=task.lastError,
+            )
+            for task in sorted(
+                [task for task in tasks if task.status == "failed"],
+                key=lambda item: (item.updatedAt, item.symbol, item.period),
+                reverse=True,
+            )[:8]
+        ]
         recent_tasks = _market_kline_recent_tasks(tasks, collection_state, cleanup_state)
-        risks = _market_kline_status_risks(failed_tasks, pending_tasks, running_tasks_count, collection_state, cleanup_state)
+        risks = _market_kline_status_risks(
+            failed_tasks,
+            pending_tasks,
+            running_tasks_count,
+            collection_state,
+            cleanup_state,
+        )
 
         backfill_running = bool(backfill_state.get("backfilling")) or running_tasks_count > 0 or pending_tasks > 0
         collection_running = bool(collection_state.get("collecting"))
@@ -1087,9 +1243,112 @@ class MySQLStore:
             periodProgress=period_progress,
             coverage=coverage,
             runningTasks=running_tasks,
+            failedTasks=failed_task_items,
             recentTasks=recent_tasks,
             risks=risks,
         )
+
+    def retry_market_kline_backfill_task(self, symbol: str, period: str) -> MarketKlineBackfillRetryResponse:
+        symbol_key = str(symbol).upper()
+        period_key = str(period).upper()
+        with _market_kline_cleanup_lock:
+            if _market_kline_cleanup_state.get("cleaning"):
+                raise MarketKlineBackfillRetryError(
+                    status_code=409,
+                    code="MARKET_KLINE_CLEANUP_RUNNING",
+                    message="Market kline cleanup is running",
+                    details={"symbol": symbol_key, "period": period_key},
+                )
+            _begin_market_kline_backfill_execution(symbol_key, period_key)
+
+        task = next(
+            (
+                item
+                for item in self.market_kline_backfill_tasks
+                if item.symbol.upper() == symbol_key and item.period.upper() == period_key
+            ),
+            None,
+        )
+        if task is None:
+            _finish_market_kline_backfill_execution()
+            raise MarketKlineBackfillRetryError(
+                status_code=404,
+                code="MARKET_KLINE_BACKFILL_TASK_NOT_FOUND",
+                message="Market kline backfill task not found",
+                details={"symbol": symbol_key, "period": period_key},
+            )
+        if task.status != "failed":
+            _finish_market_kline_backfill_execution()
+            raise MarketKlineBackfillRetryError(
+                status_code=409,
+                code="MARKET_KLINE_BACKFILL_TASK_NOT_RETRYABLE",
+                message="Market kline backfill task is not retryable",
+                details={"symbol": symbol_key, "period": period_key, "status": task.status},
+            )
+
+        claimed_task = _claim_market_kline_backfill_task(
+            self,
+            task.id,
+            expected_statuses={"failed"},
+        )
+        if claimed_task is None:
+            _finish_market_kline_backfill_execution()
+            latest_task = next(
+                (
+                    item
+                    for item in self.market_kline_backfill_tasks
+                    if item.symbol.upper() == symbol_key and item.period.upper() == period_key
+                ),
+                None,
+            )
+            status = latest_task.status if latest_task is not None else "missing"
+            raise MarketKlineBackfillRetryError(
+                status_code=409,
+                code="MARKET_KLINE_BACKFILL_TASK_NOT_RETRYABLE",
+                message="Market kline backfill task is not retryable",
+                details={"symbol": symbol_key, "period": period_key, "status": status},
+            )
+
+        try:
+            updated_task, task_stored = _advance_market_kline_backfill_task(
+                self,
+                claimed_task,
+                max_pages=1,
+            )
+            self.upsert_market_kline_backfill_task(updated_task)
+            with _market_kline_backfill_lock:
+                _market_kline_backfill_state["lastTriggeredAt"] = _now_iso()
+                _market_kline_backfill_state["storedCandles"] = task_stored
+                _market_kline_backfill_state["completedPairs"] = sum(
+                    1 for item in self.market_kline_backfill_tasks if item.status == "completed"
+                )
+                _market_kline_backfill_state["totalPairs"] = len(self.market_kline_backfill_tasks)
+            return MarketKlineBackfillRetryResponse(
+                symbol=updated_task.symbol,
+                period=updated_task.period,
+                status=updated_task.status,
+                statusLabel=_market_kline_backfill_task_status_label(updated_task.status),
+                storedCandles=updated_task.storedCandles,
+                pagesFetched=updated_task.pagesFetched,
+                message="已在当前请求内同步执行一轮历史补齐",
+                updatedAt=updated_task.updatedAt,
+            )
+        except Exception as exc:
+            failed_task = claimed_task.model_copy(
+                update={"status": "failed", "lastError": str(exc), "updatedAt": _now_iso()}
+            )
+            self.upsert_market_kline_backfill_task(failed_task)
+            with _market_kline_backfill_lock:
+                _market_kline_backfill_state["lastError"] = str(exc)
+            raise MarketKlineBackfillRetryError(
+                status_code=500,
+                code="MARKET_KLINE_BACKFILL_RETRY_FAILED",
+                message=f"Market kline backfill retry failed: {exc}",
+                details={"symbol": symbol_key, "period": period_key},
+            ) from exc
+        finally:
+            _release_market_kline_backfill_task_claim(task.id)
+            _finish_market_kline_backfill_execution()
 
     def _market_kline_coverage(self, now: datetime) -> list[MarketKlineCoverage]:
         snapshots = {item.period: item for item in self.market_kline_coverage_snapshot()}
@@ -1114,11 +1373,21 @@ class MySQLStore:
             )
         return coverage
 
-    def market_radar(self) -> MarketRadarResponse:
-        snapshots = self._market_radar_snapshots("1H", limit=40)
-        return _build_market_radar(snapshots)
+    def refresh_market_radar_snapshot(self, period: str = "1H", now: datetime | None = None) -> MarketRadarResponse:
+        normalized_period = str(period).upper()
+        ticker_24h = self._fetch_market_radar_ticker_24h()
+        snapshots = self._market_radar_snapshots(normalized_period, limit=90)
+        snapshot = _build_market_radar(snapshots, ticker_24h, now)
+        self._upsert_market_radar_snapshot(normalized_period, snapshot)
+        return snapshot
 
-    def _market_radar_snapshots(self, period: str, limit: int = 40) -> dict[str, list[Candle]]:
+    def market_radar(self) -> MarketRadarResponse:
+        snapshot = self.market_radar_snapshot("1H")
+        if snapshot is None:
+            return _empty_market_radar_response()
+        return snapshot
+
+    def _market_radar_snapshots(self, period: str, limit: int = 90) -> dict[str, list[Candle]]:
         with self._connect() as connection:
             cursor = connection.cursor()
             cursor.execute(
@@ -1141,7 +1410,46 @@ class MySQLStore:
         snapshots: dict[str, list[Candle]] = {}
         for symbol, payload in rows:
             snapshots.setdefault(str(symbol).upper(), []).append(MarketKline.model_validate_json(_payload_text(payload)).candle)
-        return {symbol: candles for symbol, candles in snapshots.items() if len(candles) >= 20}
+        return {symbol: candles for symbol, candles in snapshots.items() if len(candles) >= 73}
+
+    def _fetch_market_radar_ticker_24h(self) -> dict[str, dict[str, float]]:
+        try:
+            payload = json.loads(_read_url_with_retry("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=8))
+        except Exception as exc:
+            logging.getLogger(__name__).warning("market radar ticker 24h fetch failed: %s", exc)
+            return {}
+        if not isinstance(payload, list):
+            return {}
+        tickers: dict[str, dict[str, float]] = {}
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            try:
+                tickers[symbol] = {
+                    "quoteVolume": float(row.get("quoteVolume") or 0.0),
+                    "volume": float(row.get("volume") or 0.0),
+                }
+            except (TypeError, ValueError):
+                continue
+        return tickers
+
+    def _upsert_market_radar_snapshot(self, period: str, snapshot: MarketRadarResponse) -> None:
+        with self._connect() as connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                f"""
+                INSERT INTO `{MARKET_RADAR_SNAPSHOT_TABLE}` (period, payload, updated_at)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    payload = VALUES(payload),
+                    updated_at = VALUES(updated_at)
+                """,
+                (str(period).upper(), snapshot.model_dump_json(), _now_iso()),
+            )
+            connection.commit()
 
     def upsert_market_kline_backfill_task(self, task: MarketKlineBackfillTask) -> None:
         self._upsert("market_kline_backfill_tasks", task, self._order_for_id("market_kline_backfill_tasks", task.id))
@@ -1223,12 +1531,47 @@ def _market_kline_id(symbol: str, period: str, open_time: str) -> str:
     return f"mk-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:40]}"
 
 
-def _build_market_radar(snapshots: dict[str, list[Candle]]) -> MarketRadarResponse:
+def _market_kline_backfill_task_status_label(status: str) -> str:
+    labels = {
+        "pending": "等待中",
+        "running": "运行中",
+        "completed": "已完成",
+        "failed": "失败",
+    }
+    return labels.get(status, status)
+
+
+def _empty_market_radar_response(now: datetime | None = None) -> MarketRadarResponse:
+    return MarketRadarResponse(
+        updatedAt=_as_utc(now or datetime.now(timezone.utc)).isoformat(),
+        environment=MarketRadarEnvironment(
+            score=0,
+            status="avoid",
+            label="数据不足",
+            summary="当前市场雷达快照尚未生成，或可用于分析的 1H K 线不足。",
+            notes=["等待市场雷达快照刷新完成后再查看市场雷达。"],
+        ),
+        metrics=MarketRadarMetrics(
+            symbolsAnalyzed=0,
+            risingRatio=0,
+            volumeExpansionRatio=0,
+            strongTrendRatio=0,
+            averageVolatility=0,
+            majorTrend="数据不足",
+        ),
+        opportunityGroups={"breakout": 0, "pullback": 0, "volume_start": 0, "watch": 0},
+        recommendations=[],
+    )
+
+
+def _build_market_radar(snapshots: dict[str, list[Candle]], now: datetime | None = None) -> MarketRadarResponse:
     analyses = [
         analysis
         for symbol, candles in snapshots.items()
         if (analysis := _analyze_market_radar_symbol(symbol, candles)) is not None
     ]
+    if not analyses:
+        return _empty_market_radar_response(now)
     if not analyses:
         return MarketRadarResponse(
             updatedAt=_now_iso(),
@@ -1291,7 +1634,7 @@ def _build_market_radar(snapshots: dict[str, list[Candle]]) -> MarketRadarRespon
         groups[recommendation.category] = groups.get(recommendation.category, 0) + 1
 
     return MarketRadarResponse(
-        updatedAt=_now_iso(),
+        updatedAt=_as_utc(now or datetime.now(timezone.utc)).isoformat(),
         environment=MarketRadarEnvironment(
             score=market_score,
             status=status,  # type: ignore[arg-type]
@@ -1343,7 +1686,7 @@ def _analyze_market_radar_symbol(symbol: str, candles: list[Candle]) -> dict[str
     }
 
 
-def _market_radar_recommendation(item: dict[str, Any]) -> MarketRadarRecommendation:
+def _market_radar_recommendation(item: dict[str, Any]) -> Any:
     category = _market_radar_category(item)
     risk_level = _market_radar_risk_level(item)
     return MarketRadarRecommendation(
@@ -1445,6 +1788,492 @@ def _volume_label(ratio: float) -> str:
 
 def _round_pct(value: float) -> float:
     return round(value, 2)
+
+
+def _load_market_radar_snapshot_payload(payload_text: str) -> MarketRadarResponse | None:
+    try:
+        raw = json.loads(payload_text)
+    except Exception:
+        raw = None
+    if isinstance(raw, dict) and "recommendations" in raw and "sections" not in raw:
+        return _legacy_market_radar_snapshot(raw)
+    try:
+        return MarketRadarResponse.model_validate_json(payload_text)
+    except Exception:
+        if not isinstance(raw, dict):
+            return None
+        updated_at = _parse_datetime(str(raw.get("updatedAt") or "")) if raw.get("updatedAt") else None
+        return _empty_market_radar_response(updated_at)
+
+
+def _empty_market_radar_response(now: datetime | None = None) -> MarketRadarResponse:
+    return MarketRadarResponse(
+        updatedAt=_as_utc(now or datetime.now(timezone.utc)).isoformat(),
+        environment=MarketRadarEnvironment(
+            score=0,
+            status="avoid",
+            label="数据不足",
+            summary="当前市场雷达快照尚未就绪，或可用于分析的 1H K 线不足。",
+            notes=["等待下一轮市场雷达快照刷新完成后再查看市场雷达。"],
+        ),
+        metrics=MarketRadarMetrics(
+            symbolsAnalyzed=0,
+            risingRatio=0,
+            volumeExpansionRatio=0,
+            strongTrendRatio=0,
+            averageVolatility=0,
+            majorTrend="数据不足",
+        ),
+        opportunityGroups={"short_start": 0, "short_follow": 0, "trend_72h": 0},
+        sections=[],
+    )
+
+
+def _market_radar_snapshot_is_stale(snapshot: MarketRadarResponse, now: datetime | None = None) -> bool:
+    updated_at = _parse_datetime(snapshot.updatedAt)
+    if updated_at is None:
+        return True
+    age_seconds = (_as_utc(now or datetime.now(timezone.utc)) - _as_utc(updated_at)).total_seconds()
+    return age_seconds > MARKET_RADAR_SNAPSHOT_MAX_AGE_SECONDS
+
+
+def _build_market_radar(
+    snapshots: dict[str, list[Candle]],
+    ticker_24h: dict[str, dict[str, float]],
+    now: datetime | None = None,
+) -> MarketRadarResponse:
+    analyses: list[dict[str, Any]] = []
+    for symbol, candles in snapshots.items():
+        quote_volume = float(ticker_24h.get(symbol, {}).get("quoteVolume") or 0.0)
+        if quote_volume < 10_000_000:
+            continue
+        analysis = _analyze_market_radar_symbol(symbol, candles, quote_volume)
+        if analysis is not None:
+            analyses.append(analysis)
+    if not analyses:
+        return _empty_market_radar_response(now)
+
+    _attach_relative_ranks(analyses, "change_72h", "rank_72h")
+    short_start_items = _select_short_start(analyses)
+    short_follow_items = _select_short_follow(analyses)
+    trend_72h_items = _select_trend_72h(analyses)
+    selected_symbols = {item["symbol"] for item in short_start_items}
+    short_follow_items = [item for item in short_follow_items if item["symbol"] not in selected_symbols]
+    selected_symbols.update(item["symbol"] for item in short_follow_items)
+    trend_72h_items = [item for item in trend_72h_items if item["symbol"] not in selected_symbols]
+    strong_symbols = {item["symbol"] for item in short_start_items + short_follow_items + trend_72h_items}
+    total = len(analyses)
+
+    rising_ratio = _round_pct(sum(1 for item in analyses if item["change_6h"] > 0) / total * 100)
+    volume_expansion_ratio = _round_pct(sum(1 for item in analyses if item["volume_ratio_3h"] >= 1.15) / total * 100)
+    strong_trend_ratio = _round_pct(len(strong_symbols) / total * 100)
+    average_volatility = _round_pct(sum(item["volatility_6h"] for item in analyses) / total)
+    major_trend_score = _major_symbol_trend_score(analyses)
+    market_score = int(
+        max(
+            0,
+            min(
+                100,
+                rising_ratio * 0.22
+                + volume_expansion_ratio * 0.2
+                + strong_trend_ratio * 0.4
+                + major_trend_score * 0.18,
+            ),
+        )
+    )
+    if market_score >= 65:
+        status = "tradable"
+        label = "适合轻仓短线"
+    elif market_score >= 40:
+        status = "watch_only"
+        label = "只适合观察"
+    else:
+        status = "avoid"
+        label = "不适合主动短线"
+
+    notes = _market_radar_notes(status, rising_ratio, volume_expansion_ratio, strong_trend_ratio)
+    sections = [
+        _market_radar_section(
+            "short_start",
+            "短线启动",
+            "关注最近几小时刚开始放量走强、且价格贴近阶段高点的交易对。",
+            short_start_items,
+        ),
+        _market_radar_section(
+            "short_follow",
+            "短线延续",
+            "关注已经拉出一段、当前仍维持强势结构的交易对。",
+            short_follow_items,
+        ),
+        _market_radar_section(
+            "trend_72h",
+            "72H 强趋势",
+            "关注最近三天在可交易池里相对最强、且回撤受控的交易对。",
+            trend_72h_items,
+        ),
+    ]
+    return MarketRadarResponse(
+        updatedAt=_as_utc(now or datetime.now(timezone.utc)).isoformat(),
+        environment=MarketRadarEnvironment(
+            score=market_score,
+            status=status,  # type: ignore[arg-type]
+            label=label,
+            summary=notes[0],
+            notes=notes,
+        ),
+        metrics=MarketRadarMetrics(
+            symbolsAnalyzed=total,
+            risingRatio=rising_ratio,
+            volumeExpansionRatio=volume_expansion_ratio,
+            strongTrendRatio=strong_trend_ratio,
+            averageVolatility=average_volatility,
+            majorTrend=_major_trend_label(major_trend_score),
+        ),
+        opportunityGroups={
+            "short_start": len(short_start_items),
+            "short_follow": len(short_follow_items),
+            "trend_72h": len(trend_72h_items),
+        },
+        sections=sections,
+    )
+
+
+def _analyze_market_radar_symbol(symbol: str, candles: list[Candle], quote_volume_24h: float) -> dict[str, Any] | None:
+    ordered = sorted(candles, key=lambda candle: _parse_datetime(candle.time) or datetime.min.replace(tzinfo=timezone.utc))
+    if len(ordered) < 73:
+        return None
+    latest = ordered[-1]
+    if latest.close <= 0:
+        return None
+    latest_close = latest.close
+    return {
+        "symbol": symbol,
+        "quote_volume_24h": round(quote_volume_24h, 2),
+        "preview_candles": ordered[-60:],
+        "change_3h": _pct_change(latest_close, ordered[-4].close),
+        "change_6h": _pct_change(latest_close, ordered[-7].close),
+        "change_12h": _pct_change(latest_close, ordered[-13].close),
+        "change_24h": _pct_change(latest_close, ordered[-25].close),
+        "change_72h": _pct_change(latest_close, ordered[-73].close),
+        "volume_ratio_3h": _volume_ratio_lookback(ordered, 3, 9),
+        "pullback_6h": _pullback_from_high_lookback(ordered[-6:], latest_close),
+        "pullback_12h": _pullback_from_high_lookback(ordered[-12:], latest_close),
+        "pullback_24h": _pullback_from_high_lookback(ordered[-24:], latest_close),
+        "pullback_72h": _pullback_from_high_lookback(ordered[-72:], latest_close),
+        "volatility_6h": _volatility_pct_lookback(ordered[-6:], latest_close),
+        "above_ma20": latest.ma20 > 0 and latest.close >= latest.ma20,
+        "above_ma60": latest.ma60 > 0 and latest.close >= latest.ma60,
+    }
+
+
+def _attach_relative_ranks(items: list[dict[str, Any]], field_name: str, target_name: str) -> None:
+    ordered = sorted(items, key=lambda item: item[field_name], reverse=True)
+    total = len(ordered)
+    for index, item in enumerate(ordered, start=1):
+        item[target_name] = index
+        item[f"{target_name}_pct"] = index / total * 100
+
+
+def _select_short_start(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [
+        item
+        for item in items
+        if item["change_3h"] >= 1.5
+        and item["change_6h"] >= 3.5
+        and item["change_24h"] >= 6.0
+        and item["volume_ratio_3h"] >= 1.15
+        and item["pullback_6h"] <= 1.2
+        and item["pullback_24h"] <= 2.4
+        and item["above_ma20"]
+        and item["above_ma60"]
+    ]
+    for item in candidates:
+        item["score"] = int(
+            round(
+                min(
+                    100.0,
+                    item["change_3h"] * 12
+                    + item["change_6h"] * 10
+                    + item["change_24h"] * 3
+                    + item["volume_ratio_3h"] * 14
+                    + max(0.0, 6 - item["pullback_24h"]) * 4,
+                )
+            )
+        )
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)[:8]
+
+
+def _select_short_follow(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [
+        item
+        for item in items
+        if item["change_6h"] >= 2.4
+        and item["change_12h"] >= 5.0
+        and item["change_24h"] >= 9.0
+        and item["above_ma20"]
+        and item["above_ma60"]
+        and item["pullback_12h"] <= 1.8
+        and item["pullback_24h"] <= 3.2
+        and item["volume_ratio_3h"] >= 1.0
+    ]
+    for item in candidates:
+        item["score"] = int(
+            round(
+                min(
+                    100.0,
+                    item["change_6h"] * 7
+                    + item["change_12h"] * 8
+                    + item["change_24h"] * 4
+                    + item["volume_ratio_3h"] * 10
+                    + max(0.0, 5 - item["pullback_24h"]) * 4,
+                )
+            )
+        )
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)[:8]
+
+
+def _select_trend_72h(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    total = len(items)
+    top_cutoff = max(1, int(total * 0.1 + 0.999))
+    candidates = [
+        item
+        for item in items
+        if item.get("rank_72h", total + 1) <= top_cutoff
+        and item["change_24h"] >= 8.0
+        and item["pullback_24h"] <= 3.0
+        and item["pullback_72h"] <= 4.0
+        and item["above_ma20"]
+        and item["above_ma60"]
+        and item["quote_volume_24h"] >= 20_000_000
+    ]
+    for item in candidates:
+        rank_bonus = max(0, 12 - int(item.get("rank_72h", total)))
+        item["score"] = int(
+            round(
+                min(
+                    100.0,
+                    item["change_24h"] * 4
+                    + item["change_72h"] * 3.2
+                    + item["quote_volume_24h"] / 50_000_000
+                    + max(0.0, 5 - item["pullback_24h"]) * 4
+                    + rank_bonus * 3,
+                )
+            )
+        )
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)[:8]
+
+
+def _market_radar_section(
+    key: Literal["short_start", "short_follow", "trend_72h"],
+    title: str,
+    description: str,
+    items: list[dict[str, Any]],
+) -> MarketRadarSection:
+    return MarketRadarSection(
+        key=key,
+        title=title,
+        description=description,
+        items=[_market_radar_section_item(key, item) for item in items],
+    )
+
+
+def _market_radar_section_item(
+    key: Literal["short_start", "short_follow", "trend_72h"],
+    item: dict[str, Any],
+) -> MarketRadarSectionItem:
+    move_primary, move_secondary = _market_radar_move_labels(key, item)
+    return MarketRadarSectionItem(
+        symbol=item["symbol"],
+        category=key,
+        score=item["score"],
+        periodLabel="1H",
+        previewCandles=list(item.get("preview_candles") or []),
+        movePrimary=move_primary,
+        moveSecondary=move_secondary,
+        quoteVolume24h=item["quote_volume_24h"],
+        volumeRatio=round(item["volume_ratio_3h"], 2),
+        pullbackFromHighPct=_round_pct(_pullback_for_key(key, item)),
+        reason=_market_radar_reason_v2(key, item),
+        riskNote=_market_radar_risk_note_v2(key, item),
+    )
+
+
+def _market_radar_move_labels(
+    key: Literal["short_start", "short_follow", "trend_72h"],
+    item: dict[str, Any],
+) -> tuple[str, str]:
+    if key == "short_start":
+        return (f"3H {_signed_pct(item['change_3h'])}", f"6H {_signed_pct(item['change_6h'])}")
+    if key == "short_follow":
+        return (f"6H {_signed_pct(item['change_6h'])}", f"12H {_signed_pct(item['change_12h'])}")
+    return (f"24H {_signed_pct(item['change_24h'])}", f"72H {_signed_pct(item['change_72h'])}")
+
+
+def _pullback_for_key(key: str, item: dict[str, Any]) -> float:
+    if key == "short_start":
+        return item["pullback_6h"]
+    if key == "short_follow":
+        return item["pullback_12h"]
+    return item["pullback_72h"]
+
+
+def _market_radar_reason_v2(key: str, item: dict[str, Any]) -> str:
+    if key == "short_start":
+        return f"近6小时启动走强，量比 {round(item['volume_ratio_3h'], 2)}，距6H高点回撤 {_round_pct(item['pullback_6h'])}% 。"
+    if key == "short_follow":
+        return f"近12小时保持延续上涨，仍在 MA20 上方，距12H高点回撤 {_round_pct(item['pullback_12h'])}% 。"
+    return f"72H 强度位于可交易池前列，24H 成交额 {_format_quote_volume(item['quote_volume_24h'])}，距72H高点回撤 {_round_pct(item['pullback_72h'])}% 。"
+
+
+def _market_radar_risk_note_v2(key: str, item: dict[str, Any]) -> str:
+    pullback = _pullback_for_key(key, item)
+    if pullback <= 1.2:
+        return "当前离阶段高点较近，适合等回踩确认，避免直接追高。"
+    if pullback <= 3:
+        return "结构仍完整，但已有一定回撤，关注下一次放量确认。"
+    return "回撤已经扩大，虽然仍在候选内，但需要更严格控制仓位。"
+
+
+def _market_radar_notes(status: str, rising_ratio: float, volume_ratio: float, strong_ratio: float) -> list[str]:
+    if status == "tradable":
+        first = "市场里有一定数量的短线强势标的，可以轻仓跟踪最强一批。"
+    elif status == "watch_only":
+        first = "市场有局部机会，但强势结构还不够普遍，更适合观察后再出手。"
+    else:
+        first = "市场里可执行的短线强势结构不多，当前更适合等待。"
+    return [
+        first,
+        f"最近 6H 仍在上涨的可交易对占比 {rising_ratio}%，放量占比 {volume_ratio}%。",
+        f"进入三类强势列表的交易对占比 {strong_ratio}%，优先看最强的一小批。",
+    ]
+
+
+def _major_symbol_trend_score(analyses: list[dict[str, Any]]) -> float:
+    majors = [item for item in analyses if item["symbol"] in {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}]
+    if not majors:
+        return 50
+    return sum(1 for item in majors if item["change_24h"] > 0 and item["change_6h"] > 0) / len(majors) * 100
+
+
+def _major_trend_label(score: float) -> str:
+    if score >= 70:
+        return "主流币偏强"
+    if score >= 40:
+        return "主流币分化"
+    return "主流币偏弱"
+
+
+def _pct_change(current_close: float, previous_close: float) -> float:
+    if previous_close <= 0:
+        return 0.0
+    return _round_pct((current_close - previous_close) / previous_close * 100)
+
+
+def _volume_ratio_lookback(candles: list[Candle], recent_count: int, previous_count: int) -> float:
+    recent = candles[-recent_count:]
+    previous = candles[-(recent_count + previous_count):-recent_count]
+    if not recent or not previous:
+        return 0.0
+    previous_average = sum(candle.volume for candle in previous) / len(previous)
+    if previous_average <= 0:
+        return 0.0
+    recent_average = sum(candle.volume for candle in recent) / len(recent)
+    return round(recent_average / previous_average, 2)
+
+
+def _pullback_from_high_lookback(candles: list[Candle], latest_close: float) -> float:
+    if not candles or latest_close <= 0:
+        return 0.0
+    high = max(candle.high for candle in candles)
+    return _round_pct(max(0.0, (high - latest_close) / latest_close * 100))
+
+
+def _volatility_pct_lookback(candles: list[Candle], latest_close: float) -> float:
+    if not candles or latest_close <= 0:
+        return 0.0
+    high = max(candle.high for candle in candles)
+    low = min(candle.low for candle in candles)
+    return _round_pct((high - low) / latest_close * 100)
+
+
+def _signed_pct(value: float) -> str:
+    return f"{value:+.2f}%"
+
+
+def _format_quote_volume(value: float) -> str:
+    if value >= 100_000_000:
+        return f"{value / 100_000_000:.2f} 亿 USDT"
+    if value >= 10_000:
+        return f"{value / 10_000:.2f} 万 USDT"
+    return f"{value:.2f} USDT"
+
+
+def _legacy_market_radar_snapshot(raw: dict[str, Any]) -> MarketRadarResponse:
+    updated_at = _parse_datetime(str(raw.get("updatedAt") or "")) if raw.get("updatedAt") else None
+    recommendations = raw.get("recommendations") if isinstance(raw.get("recommendations"), list) else []
+    grouped_items = {"short_start": [], "short_follow": [], "trend_72h": []}
+    legacy_category_map = {
+        "breakout": "short_start",
+        "volume_start": "short_start",
+        "pullback": "short_follow",
+        "watch": "short_follow",
+    }
+    for item in recommendations:
+        symbol = str(item.get("symbol") or "")
+        if not symbol:
+            continue
+        section_key = legacy_category_map.get(str(item.get("category") or ""), "short_follow")
+        grouped_items[section_key].append(
+            MarketRadarSectionItem(
+                symbol=symbol,
+                category=section_key,  # type: ignore[arg-type]
+                score=int(item.get("score") or 0),
+                periodLabel=str(item.get("period") or "1H"),
+                previewCandles=[
+                    Candle.model_validate(candle)
+                    for candle in item.get("previewCandles") or []
+                    if isinstance(candle, dict)
+                ],
+                movePrimary=f"24H {_signed_pct(float(item.get('changePct') or 0.0))}",
+                moveSecondary=f"量比 {float(item.get('volumeRatio') or 0.0):.2f}",
+                quoteVolume24h=0.0,
+                volumeRatio=round(float(item.get("volumeRatio") or 0.0), 2),
+                pullbackFromHighPct=0.0,
+                reason=str(item.get("reason") or "兼容旧版快照推荐。"),
+                riskNote=str(item.get("riskNote") or ""),
+            )
+        )
+    sections = [
+        MarketRadarSection(key="short_start", title="短线启动", description="由旧版快照兼容转换，等待新快照刷新。", items=grouped_items["short_start"]),
+        MarketRadarSection(key="short_follow", title="短线延续", description="由旧版快照兼容转换，等待新快照刷新。", items=grouped_items["short_follow"]),
+        MarketRadarSection(key="trend_72h", title="72H 强趋势", description="由旧版快照兼容转换，等待新快照刷新。", items=[]),
+    ]
+    environment_raw = raw.get("environment") if isinstance(raw.get("environment"), dict) else {}
+    metrics_raw = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+    return MarketRadarResponse(
+        updatedAt=_as_utc(updated_at or datetime.now(timezone.utc)).isoformat(),
+        environment=MarketRadarEnvironment(
+            score=int(environment_raw.get("score") or 0),
+            status=str(environment_raw.get("status") or "watch_only"),  # type: ignore[arg-type]
+            label=str(environment_raw.get("label") or "兼容旧快照"),
+            summary=str(environment_raw.get("summary") or "旧版快照已兼容读取，等待新快照刷新。"),
+            notes=[str(note) for note in environment_raw.get("notes") or ["旧版快照已兼容读取，等待新快照刷新。"]],
+        ),
+        metrics=MarketRadarMetrics(
+            symbolsAnalyzed=int(metrics_raw.get("symbolsAnalyzed") or len(recommendations)),
+            risingRatio=float(metrics_raw.get("risingRatio") or 0),
+            volumeExpansionRatio=float(metrics_raw.get("volumeExpansionRatio") or 0),
+            strongTrendRatio=float(metrics_raw.get("strongTrendRatio") or 0),
+            averageVolatility=float(metrics_raw.get("averageVolatility") or 0),
+            majorTrend=str(metrics_raw.get("majorTrend") or "数据不足"),
+        ),
+        opportunityGroups={
+            "short_start": len(grouped_items["short_start"]),
+            "short_follow": len(grouped_items["short_follow"]),
+            "trend_72h": 0,
+        },
+        sections=sections,
+    )
 
 
 def _signal_performance_id(signal_id: str) -> str:
@@ -2433,6 +3262,14 @@ def _latest_period_boundary(period: str, now: datetime) -> datetime:
     return normalized.replace(minute=0)
 
 
+def _first_expected_market_kline_time(start: datetime, period: str) -> datetime:
+    normalized_start = _as_utc(start).replace(second=0, microsecond=0)
+    floored = _floor_datetime_to_period(normalized_start, period)
+    if floored < normalized_start:
+        return floored + timedelta(seconds=_period_seconds(period))
+    return floored
+
+
 def _strategy_is_due(strategy: Strategy, now: datetime) -> bool:
     if not _strategy_can_be_scheduled(strategy):
         return False
@@ -3046,6 +3883,94 @@ def _market_kline_status_risks(
     return risks
 
 
+_market_radar_snapshot_lock = threading.Lock()
+_market_radar_snapshot_stop_event: threading.Event | None = None
+_market_radar_snapshot_thread: threading.Thread | None = None
+_market_radar_snapshot_state: dict[str, Any] = {
+    "running": False,
+    "refreshing": False,
+    "checkIntervalSeconds": 300,
+    "lastCheckedAt": None,
+    "lastTriggeredAt": None,
+    "lastRefreshedPeriod": None,
+    "lastError": "",
+}
+
+
+def run_market_radar_snapshot_scheduler_tick(
+    store_instance: Any,
+    check_time: datetime | None = None,
+) -> str | None:
+    now = check_time or datetime.now(timezone.utc)
+    with _market_radar_snapshot_lock:
+        if _market_radar_snapshot_state.get("refreshing"):
+            return None
+        _market_radar_snapshot_state["lastCheckedAt"] = _now_iso()
+        _market_radar_snapshot_state["lastError"] = ""
+        _market_radar_snapshot_state["refreshing"] = True
+    try:
+        period = "1H"
+        store_instance.refresh_market_radar_snapshot(period, now)
+        with _market_radar_snapshot_lock:
+            _market_radar_snapshot_state["lastTriggeredAt"] = _now_iso()
+            _market_radar_snapshot_state["lastRefreshedPeriod"] = period
+        return period
+    except Exception as exc:
+        with _market_radar_snapshot_lock:
+            _market_radar_snapshot_state["lastError"] = str(exc)
+        return None
+    finally:
+        with _market_radar_snapshot_lock:
+            _market_radar_snapshot_state["refreshing"] = False
+
+
+def start_market_radar_snapshot_scheduler(store_instance: Any, check_interval_seconds: int = 300) -> None:
+    global _market_radar_snapshot_stop_event, _market_radar_snapshot_thread
+    with _market_radar_snapshot_lock:
+        if _market_radar_snapshot_thread is not None and _market_radar_snapshot_thread.is_alive():
+            return
+        _market_radar_snapshot_stop_event = threading.Event()
+        _market_radar_snapshot_state.update(
+            {
+                "running": True,
+                "checkIntervalSeconds": check_interval_seconds,
+                "lastError": "",
+            }
+        )
+        _market_radar_snapshot_thread = threading.Thread(
+            target=_market_radar_snapshot_loop,
+            args=(store_instance, check_interval_seconds, _market_radar_snapshot_stop_event),
+            daemon=True,
+        )
+        _market_radar_snapshot_thread.start()
+
+
+def stop_market_radar_snapshot_scheduler() -> None:
+    global _market_radar_snapshot_stop_event, _market_radar_snapshot_thread
+    with _market_radar_snapshot_lock:
+        stop_event = _market_radar_snapshot_stop_event
+        thread = _market_radar_snapshot_thread
+        _market_radar_snapshot_stop_event = None
+        _market_radar_snapshot_thread = None
+        _market_radar_snapshot_state["running"] = False
+        _market_radar_snapshot_state["refreshing"] = False
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2)
+
+
+def _market_radar_snapshot_loop(
+    store_instance: Any,
+    check_interval_seconds: int,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
+        run_market_radar_snapshot_scheduler_tick(store_instance)
+        if stop_event.wait(check_interval_seconds):
+            break
+
+
 _market_kline_coverage_snapshot_lock = threading.Lock()
 _market_kline_coverage_snapshot_stop_event: threading.Event | None = None
 _market_kline_coverage_snapshot_thread: threading.Thread | None = None
@@ -3161,6 +4086,24 @@ def _market_kline_cleanup_is_cleaning() -> bool:
         return bool(_market_kline_cleanup_state.get("cleaning"))
 
 
+def _try_begin_market_kline_cleanup_run(cleanup_date: str) -> dict[str, Any] | None:
+    with _market_kline_cleanup_lock:
+        _market_kline_cleanup_state["lastCheckedAt"] = _now_iso()
+        _market_kline_cleanup_state["lastError"] = ""
+        if _market_kline_cleanup_state.get("lastCleanupDate") == cleanup_date:
+            return {"deletedCandles": 0, "periods": {}, "skipped": "already_ran_today"}
+        if _market_kline_cleanup_state.get("cleaning"):
+            return {"deletedCandles": 0, "periods": {}, "skipped": "cleanup_running"}
+        with _market_kline_collection_lock:
+            if _market_kline_collection_state.get("collecting"):
+                return {"deletedCandles": 0, "periods": {}, "skipped": "kline_busy"}
+        with _market_kline_backfill_lock:
+            if int(_market_kline_backfill_state.get("activeExecutions") or 0) > 0:
+                return {"deletedCandles": 0, "periods": {}, "skipped": "kline_busy"}
+        _market_kline_cleanup_state["cleaning"] = True
+        return None
+
+
 def run_market_kline_cleanup_scheduler_tick(
     store_instance: Any,
     now: datetime | None = None,
@@ -3168,17 +4111,9 @@ def run_market_kline_cleanup_scheduler_tick(
 ) -> dict[str, Any]:
     check_time = _as_utc(now or datetime.now(timezone.utc))
     cleanup_date = check_time.date().isoformat()
-    with _market_kline_cleanup_lock:
-        _market_kline_cleanup_state["lastCheckedAt"] = _now_iso()
-        _market_kline_cleanup_state["lastError"] = ""
-        if _market_kline_cleanup_state.get("lastCleanupDate") == cleanup_date:
-            return {"deletedCandles": 0, "periods": {}, "skipped": "already_ran_today"}
-
-    if _market_kline_collection_is_collecting() or _market_kline_backfill_is_backfilling():
-        return {"deletedCandles": 0, "periods": {}, "skipped": "kline_busy"}
-
-    with _market_kline_cleanup_lock:
-        _market_kline_cleanup_state["cleaning"] = True
+    early_result = _try_begin_market_kline_cleanup_run(cleanup_date)
+    if early_result is not None:
+        return early_result
 
     try:
         deleted_by_period = store_instance.delete_old_market_klines(check_time, batch_size)
@@ -3245,6 +4180,7 @@ _market_kline_backfill_thread: threading.Thread | None = None
 _market_kline_backfill_state: dict[str, Any] = {
     "running": False,
     "backfilling": False,
+    "activeExecutions": 0,
     "checkIntervalSeconds": 30,
     "lastCheckedAt": None,
     "lastTriggeredAt": None,
@@ -3254,12 +4190,33 @@ _market_kline_backfill_state: dict[str, Any] = {
     "totalPairs": 0,
     "storedCandles": 0,
     "lastError": "",
+    "activeTaskIds": set(),
 }
 
 
 def _market_kline_backfill_is_backfilling() -> bool:
     with _market_kline_backfill_lock:
-        return bool(_market_kline_backfill_state.get("backfilling"))
+        return bool(_market_kline_backfill_state.get("backfilling")) or int(_market_kline_backfill_state.get("activeExecutions") or 0) > 0
+
+
+def _begin_market_kline_backfill_execution(symbol: str, period: str) -> None:
+    with _market_kline_backfill_lock:
+        active_executions = int(_market_kline_backfill_state.get("activeExecutions") or 0) + 1
+        _market_kline_backfill_state["activeExecutions"] = active_executions
+        _market_kline_backfill_state["backfilling"] = active_executions > 0
+        _market_kline_backfill_state["currentSymbol"] = symbol
+        _market_kline_backfill_state["currentPeriod"] = period
+        _market_kline_backfill_state["lastError"] = ""
+
+
+def _finish_market_kline_backfill_execution() -> None:
+    with _market_kline_backfill_lock:
+        active_executions = max(0, int(_market_kline_backfill_state.get("activeExecutions") or 0) - 1)
+        _market_kline_backfill_state["activeExecutions"] = active_executions
+        _market_kline_backfill_state["backfilling"] = active_executions > 0
+        if active_executions == 0:
+            _market_kline_backfill_state["currentSymbol"] = ""
+            _market_kline_backfill_state["currentPeriod"] = ""
 
 
 def _market_kline_backfill_has_unfinished_tasks(store_instance: Any) -> bool:
@@ -3300,28 +4257,41 @@ def run_market_kline_backfill_scheduler_tick(
     processed_pairs = 0
 
     with _market_kline_backfill_lock:
-        _market_kline_backfill_state["backfilling"] = bool(pending_tasks)
+        _market_kline_backfill_state["backfilling"] = int(_market_kline_backfill_state.get("activeExecutions") or 0) > 0 or bool(pending_tasks)
         _market_kline_backfill_state["totalPairs"] = len(tasks)
         _market_kline_backfill_state["completedPairs"] = sum(1 for task in tasks if task.status == "completed")
 
     try:
+        if pending_tasks:
+            _begin_market_kline_backfill_execution("", "")
         for task in pending_tasks:
+            claimed_task = _claim_market_kline_backfill_task(
+                store_instance,
+                task.id,
+                expected_statuses={"pending", "running", "failed"},
+            )
+            if claimed_task is None:
+                continue
             processed_pairs += 1
             with _market_kline_backfill_lock:
-                _market_kline_backfill_state["currentSymbol"] = task.symbol
-                _market_kline_backfill_state["currentPeriod"] = task.period
+                _market_kline_backfill_state["currentSymbol"] = claimed_task.symbol
+                _market_kline_backfill_state["currentPeriod"] = claimed_task.period
             try:
                 updated_task, task_stored = _advance_market_kline_backfill_task(
                     store_instance,
-                    task,
+                    claimed_task,
                     max_pages=max_pages_per_pair,
                 )
                 stored_candles += task_stored
                 store_instance.upsert_market_kline_backfill_task(updated_task)
             except Exception as exc:
-                errors.append(f"{task.symbol} / {task.period}: {exc}")
-                failed = task.model_copy(update={"status": "failed", "lastError": str(exc), "updatedAt": _now_iso()})
+                errors.append(f"{claimed_task.symbol} / {claimed_task.period}: {exc}")
+                failed = claimed_task.model_copy(
+                    update={"status": "failed", "lastError": str(exc), "updatedAt": _now_iso()}
+                )
                 store_instance.upsert_market_kline_backfill_task(failed)
+            finally:
+                _release_market_kline_backfill_task_claim(claimed_task.id)
 
         refreshed_tasks = store_instance.market_kline_backfill_tasks
         with _market_kline_backfill_lock:
@@ -3331,10 +4301,8 @@ def run_market_kline_backfill_scheduler_tick(
             _market_kline_backfill_state["storedCandles"] = stored_candles
             _market_kline_backfill_state["lastError"] = "\n".join(errors[:3])
     finally:
-        with _market_kline_backfill_lock:
-            _market_kline_backfill_state["backfilling"] = False
-            _market_kline_backfill_state["currentSymbol"] = ""
-            _market_kline_backfill_state["currentPeriod"] = ""
+        if pending_tasks:
+            _finish_market_kline_backfill_execution()
 
     return {"processedPairs": processed_pairs, "storedCandles": stored_candles, "errors": errors}
 
@@ -3388,14 +4356,34 @@ def _ensure_market_kline_backfill_tasks(store_instance: Any, symbols: list[str],
             task_id = _market_kline_backfill_task_id(normalized_symbol, period)
             if task_id in existing:
                 continue
-            next_start = _market_kline_initial_backfill_start(store_instance, normalized_symbol, period, target_start, target_end)
-            status = "completed" if next_start >= target_end else "pending"
+            missing_window = _market_kline_first_missing_window(
+                store_instance,
+                normalized_symbol,
+                period,
+                target_start,
+                target_end,
+            )
+            if missing_window is not None:
+                task_target_start, task_target_end = missing_window
+                next_start = task_target_start
+                status = "pending"
+            else:
+                task_target_start = target_start
+                task_target_end = target_end
+                next_start = _market_kline_initial_backfill_start(
+                    store_instance,
+                    normalized_symbol,
+                    period,
+                    target_start,
+                    target_end,
+                )
+                status = "completed" if next_start >= target_end else "pending"
             task = MarketKlineBackfillTask(
                 id=task_id,
                 symbol=normalized_symbol,
                 period=period,  # type: ignore[arg-type]
-                targetStart=target_start.isoformat(),
-                targetEnd=target_end.isoformat(),
+                targetStart=task_target_start.isoformat(),
+                targetEnd=task_target_end.isoformat(),
                 nextStart=next_start.isoformat(),
                 status=status,  # type: ignore[arg-type]
                 createdAt=_now_iso(),
@@ -3425,13 +4413,44 @@ def _refresh_market_kline_backfill_candidate_tasks(
     for task in tasks[:max_candidates]:
         target_start = _market_kline_target_start(task.period, now)
         target_end = _latest_period_boundary(task.period, now)
-        refreshed = _refresh_market_kline_backfill_task_window(task, target_start, target_end)
+        refreshed = _refresh_market_kline_backfill_task_window(store_instance, task, target_start, target_end)
         refreshed_by_id[task.id] = refreshed
         if refreshed != task:
             store_instance.upsert_market_kline_backfill_task(refreshed)
     if not refreshed_by_id:
         return tasks
     return [refreshed_by_id.get(task.id, task) for task in tasks]
+
+
+def _claim_market_kline_backfill_task(
+    store_instance: Any,
+    task_id: str,
+    expected_statuses: set[str],
+) -> MarketKlineBackfillTask | None:
+    with _market_kline_backfill_lock:
+        active_task_ids = set(_market_kline_backfill_state.get("activeTaskIds") or set())
+        if task_id in active_task_ids:
+            return None
+        latest_task = next((item for item in store_instance.market_kline_backfill_tasks if item.id == task_id), None)
+        if latest_task is None or latest_task.status not in expected_statuses:
+            return None
+        active_task_ids.add(task_id)
+        _market_kline_backfill_state["activeTaskIds"] = active_task_ids
+        claimed_task = latest_task.model_copy(update={"status": "running", "updatedAt": _now_iso()})
+        try:
+            store_instance.upsert_market_kline_backfill_task(claimed_task)
+        except Exception:
+            active_task_ids.discard(task_id)
+            _market_kline_backfill_state["activeTaskIds"] = active_task_ids
+            raise
+        return claimed_task
+
+
+def _release_market_kline_backfill_task_claim(task_id: str) -> None:
+    with _market_kline_backfill_lock:
+        active_task_ids = set(_market_kline_backfill_state.get("activeTaskIds") or set())
+        active_task_ids.discard(task_id)
+        _market_kline_backfill_state["activeTaskIds"] = active_task_ids
 
 
 def _market_kline_backfill_priority_symbols(store_instance: Any) -> set[str]:
@@ -3455,12 +4474,40 @@ def _market_kline_backfill_symbol_priority(symbol: str, priority_symbols: set[st
 
 
 def _refresh_market_kline_backfill_task_window(
+    store_instance: Any,
     task: MarketKlineBackfillTask,
     target_start: datetime,
     target_end: datetime,
 ) -> MarketKlineBackfillTask:
     current_target_end = _parse_datetime(task.targetEnd)
     current_next_start = _parse_datetime(task.nextStart)
+    missing_window = _market_kline_first_missing_window(
+        store_instance,
+        task.symbol,
+        task.period,
+        target_start,
+        target_end,
+        allow_full_window_when_empty=False,
+    )
+    if missing_window is not None:
+        gap_start, gap_end = missing_window
+        update: dict[str, Any] = {
+            "targetStart": gap_start.isoformat(),
+            "targetEnd": gap_end.isoformat(),
+            "nextStart": gap_start.isoformat(),
+        }
+        if task.status == "completed":
+            update["status"] = "pending"
+        if (
+            task.targetStart == update["targetStart"]
+            and task.targetEnd == update["targetEnd"]
+            and task.nextStart == update["nextStart"]
+            and "status" not in update
+        ):
+            return task
+        update["updatedAt"] = _now_iso()
+        return task.model_copy(update=update)
+
     if current_target_end is None or current_next_start is None:
         return task.model_copy(
             update={
@@ -3507,6 +4554,58 @@ def _market_kline_initial_backfill_start(
     if earliest_utc > target_start:
         return target_start
     return min(latest_utc + timedelta(seconds=_period_seconds(period)), target_end)
+
+
+def _market_kline_first_missing_window(
+    store_instance: Any,
+    symbol: str,
+    period: str,
+    target_start: datetime,
+    target_end: datetime,
+    *,
+    allow_full_window_when_empty: bool = True,
+) -> tuple[datetime, datetime] | None:
+    normalized_start = _first_expected_market_kline_time(target_start, period)
+    normalized_end = _as_utc(target_end)
+    if normalized_start >= normalized_end:
+        return None
+
+    with store_instance._connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            f"""
+            SELECT open_time FROM `{MARKET_KLINE_TABLE}`
+            WHERE symbol = %s AND period = %s AND open_time >= %s AND open_time < %s
+            ORDER BY open_time ASC
+            """,
+            (symbol.upper(), str(period).upper(), normalized_start.isoformat(), normalized_end.isoformat()),
+        )
+        rows = cursor.fetchall()
+
+    expected_step = timedelta(seconds=_period_seconds(period))
+    last_seen_time: datetime | None = None
+    for row in rows:
+        parsed_time = _parse_datetime(str(row[0] or ""))
+        if parsed_time is None:
+            continue
+        open_time = _as_utc(parsed_time)
+        if open_time < normalized_start:
+            continue
+        if last_seen_time is not None:
+            expected_next_time = last_seen_time + expected_step
+            if open_time > expected_next_time:
+                return expected_next_time, min(open_time, normalized_end)
+        last_seen_time = open_time
+
+    if last_seen_time is None:
+        if not allow_full_window_when_empty:
+            return None
+        return normalized_start, normalized_end
+
+    trailing_start = last_seen_time + expected_step
+    if trailing_start < normalized_end:
+        return trailing_start, normalized_end
+    return None
 
 
 def _advance_market_kline_backfill_task(

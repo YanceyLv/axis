@@ -39,9 +39,9 @@ const navItems: Array<{
   label: string;
   icon: typeof Home;
 }> = [
+  { key: "dashboard", label: "首页", icon: Home },
   { key: "market-radar", label: "市场雷达", icon: Radar },
   { key: "market-data", label: "数据采集", icon: Database },
-  { key: "dashboard", label: "首页", icon: Home },
   { key: "strategies", label: "策略中心", icon: Sparkles },
   { key: "signals", label: "信号中心", icon: BellRing },
   { key: "new-coins", label: "新币监测", icon: Rocket },

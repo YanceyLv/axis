@@ -12,6 +12,7 @@ from app.store import (
     start_market_kline_cleanup_scheduler,
     start_market_kline_collection_scheduler,
     start_market_kline_coverage_snapshot_scheduler,
+    start_market_radar_snapshot_scheduler,
     start_new_coin_scheduler,
     start_signal_cleanup_scheduler,
     start_signal_performance_scheduler,
@@ -20,6 +21,7 @@ from app.store import (
     stop_market_kline_cleanup_scheduler,
     stop_market_kline_collection_scheduler,
     stop_market_kline_coverage_snapshot_scheduler,
+    stop_market_radar_snapshot_scheduler,
     stop_new_coin_scheduler,
     stop_signal_cleanup_scheduler,
     stop_signal_performance_scheduler,
@@ -32,6 +34,7 @@ from app.store import (
 async def lifespan(_app: FastAPI):
     start_market_kline_cleanup_scheduler(store)
     start_market_kline_coverage_snapshot_scheduler(store)
+    start_market_radar_snapshot_scheduler(store)
     start_market_kline_backfill_scheduler(store)
     start_market_kline_collection_scheduler(store)
     start_strategy_scheduler(store)
@@ -47,6 +50,7 @@ async def lifespan(_app: FastAPI):
         stop_strategy_scheduler()
         stop_market_kline_collection_scheduler()
         stop_market_kline_backfill_scheduler()
+        stop_market_radar_snapshot_scheduler()
         stop_market_kline_coverage_snapshot_scheduler()
         stop_market_kline_cleanup_scheduler()
 

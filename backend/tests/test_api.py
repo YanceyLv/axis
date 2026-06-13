@@ -1,3 +1,4 @@
+import json
 import os
 import inspect
 import time
@@ -49,8 +50,14 @@ def reset_store():
     store_module._market_kline_collection_state["collecting"] = False
     store_module._market_kline_collection_state["lastCollectedBoundaries"] = {}
     store_module._market_kline_collection_state["lastSkippedPairs"] = 0
+    if hasattr(store_module, "_market_radar_snapshot_state"):
+        store_module._market_radar_snapshot_state["refreshing"] = False
+        store_module._market_radar_snapshot_state["lastError"] = ""
+        store_module._market_radar_snapshot_state["lastTriggeredAt"] = None
     if hasattr(store_module, "_market_kline_backfill_state"):
         store_module._market_kline_backfill_state["backfilling"] = False
+        store_module._market_kline_backfill_state["activeExecutions"] = 0
+        store_module._market_kline_backfill_state["activeTaskIds"] = set()
     if hasattr(store_module, "_market_kline_cleanup_state"):
         store_module._market_kline_cleanup_state["cleaning"] = False
         store_module._market_kline_cleanup_state["lastCleanupDate"] = None
@@ -131,6 +138,156 @@ def trend_candles(
         )
         price = close
     return candles
+
+
+def candles_from_close_series(
+    closes: list[float],
+    *,
+    start: datetime | None = None,
+    step_minutes: int = 60,
+    base_volume: float = 1000,
+    volume_step: float = 0,
+) -> list[Candle]:
+    start_time = start or datetime(2026, 5, 20, 0, 0, 0, tzinfo=timezone.utc)
+    candles: list[Candle] = []
+    ma5_window: list[float] = []
+    ma20_window: list[float] = []
+    ma60_window: list[float] = []
+    previous_close = closes[0]
+    for index, close in enumerate(closes):
+        open_price = previous_close
+        high = max(open_price, close) + 0.03
+        low = min(open_price, close) - 0.03
+        ma5_window.append(close)
+        ma20_window.append(close)
+        ma60_window.append(close)
+        ma5 = sum(ma5_window[-5:]) / len(ma5_window[-5:])
+        ma20 = sum(ma20_window[-20:]) / len(ma20_window[-20:])
+        ma60 = sum(ma60_window[-60:]) / len(ma60_window[-60:])
+        candles.append(
+            Candle(
+                time=(start_time + index * timedelta(minutes=step_minutes)).isoformat(),
+                open=open_price,
+                high=high,
+                low=low,
+                close=close,
+                volume=base_volume + index * volume_step,
+                ma5=round(ma5, 6),
+                ma20=round(ma20, 6),
+                ma60=round(ma60, 6),
+            )
+        )
+        previous_close = close
+    return candles
+
+
+def flat_then_wiggle_candles(
+    start_price: float,
+    *,
+    count: int = 90,
+    start: datetime | None = None,
+    step_minutes: int = 60,
+) -> list[Candle]:
+    closes: list[float] = []
+    price = start_price
+    for index in range(count):
+        if index < count - 18:
+            price += 0.005 if index % 2 == 0 else -0.005
+        else:
+            price += 0.03 if index % 3 == 0 else -0.028
+        closes.append(round(price, 6))
+    return candles_from_close_series(
+        closes,
+        start=start,
+        step_minutes=step_minutes,
+        base_volume=420,
+        volume_step=0.2,
+    )
+
+
+def weak_bounce_candles(
+    start_price: float,
+    *,
+    count: int = 90,
+    start: datetime | None = None,
+    step_minutes: int = 60,
+) -> list[Candle]:
+    closes: list[float] = []
+    price = start_price
+    for index in range(count):
+        if index < count - 16:
+            price -= 0.035 if index % 2 == 0 else 0.015
+        else:
+            price += 0.05 if index % 3 == 0 else -0.01
+        closes.append(round(max(price, 0.1), 6))
+    return candles_from_close_series(
+        closes,
+        start=start,
+        step_minutes=step_minutes,
+        base_volume=760,
+        volume_step=1.4,
+    )
+
+
+def breakout_trend_candles(
+    start_price: float,
+    *,
+    count: int = 90,
+    start: datetime | None = None,
+    step_minutes: int = 60,
+) -> list[Candle]:
+    closes: list[float] = []
+    price = start_price
+    for index in range(count):
+        if index < count - 30:
+            price += 0.01 if index % 3 else 0.018
+        elif index < count - 10:
+            price += 0.06 + index * 0.0015
+        else:
+            price += 0.12 if index % 2 == 0 else 0.07
+        closes.append(round(price, 6))
+    return candles_from_close_series(
+        closes,
+        start=start,
+        step_minutes=step_minutes,
+        base_volume=1400,
+        volume_step=22,
+    )
+
+
+def seed_market_radar_fixture(store_instance: MySQLStore, base_time: datetime) -> None:
+    start_candles = trend_candles(8.0, 0.18, count=90, volume=700, volume_step=40, start=base_time)
+    for candle in start_candles[-3:]:
+        candle.volume *= 2.2
+    store_instance.upsert_market_candles(
+        "STARTUSDT",
+        "1H",
+        start_candles,
+    )
+    store_instance.upsert_market_candles(
+        "FOLLOWUSDT",
+        "1H",
+        trend_candles(16.0, 0.12, count=90, volume=1400, volume_step=18, start=base_time),
+    )
+    trend_candles_72h = trend_candles(40.0, 1.1, count=90, volume=1800, volume_step=12, start=base_time)
+    for candle in trend_candles_72h[-3:]:
+        candle.volume *= 0.82
+    store_instance.upsert_market_candles(
+        "TRENDUSDT",
+        "1H",
+        trend_candles_72h,
+    )
+
+
+def seeded_24h_tickers() -> dict[str, dict[str, float]]:
+    return {
+        "STARTUSDT": {"quoteVolume": 18_000_000, "volume": 1_800_000},
+        "FOLLOWUSDT": {"quoteVolume": 26_000_000, "volume": 2_600_000},
+        "TRENDUSDT": {"quoteVolume": 41_000_000, "volume": 4_100_000},
+        "CHOPUSDT": {"quoteVolume": 22_000_000, "volume": 2_200_000},
+        "STRONGUSDT": {"quoteVolume": 18_000_000, "volume": 1_800_000},
+        "THINUSDT": {"quoteVolume": 8_000_000, "volume": 800_000},
+    }
 
 
 def seed_market_candles(symbol: str, period: str = "1H", seed: float = 1.0, count: int = 240) -> None:
@@ -927,6 +1084,342 @@ def test_market_kline_backfill_reopens_completed_task_when_target_end_moves(monk
     assert one_hour_call[3] == datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def test_market_kline_backfill_reopens_completed_5m_task_when_history_has_gap(monkeypatch):
+    now_iso = datetime(2026, 6, 1, 2, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-GAPUSDT-5M",
+            symbol="GAPUSDT",
+            period="5M",
+            targetStart=datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 2, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 6, 1, 2, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="completed",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+    store.upsert_market_candles(
+        "GAPUSDT",
+        "5M",
+        [
+            *market_candles(
+                1.0,
+                count=3,
+                start=datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc),
+                step_minutes=5,
+            ),
+            *market_candles(
+                2.0,
+                count=19,
+                start=datetime(2026, 6, 1, 0, 25, 0, tzinfo=timezone.utc),
+                step_minutes=5,
+            ),
+        ],
+    )
+
+    task = next(item for item in store.market_kline_backfill_tasks if item.id == "mkbf-GAPUSDT-5M")
+    refreshed = store_module._refresh_market_kline_backfill_task_window(
+        store,
+        task,
+        datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 1, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert refreshed.status == "pending"
+    assert refreshed.targetStart == datetime(2026, 6, 1, 0, 15, 0, tzinfo=timezone.utc).isoformat()
+    assert refreshed.nextStart == datetime(2026, 6, 1, 0, 15, 0, tzinfo=timezone.utc).isoformat()
+    assert refreshed.targetEnd == datetime(2026, 6, 1, 0, 25, 0, tzinfo=timezone.utc).isoformat()
+
+
+def test_market_kline_backfill_retry_rejects_non_failed_task():
+    headers = auth_headers("kline-backfill-retry-conflict@example.com")
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-ETHUSDT-5M",
+            symbol="ETHUSDT",
+            period="5M",
+            targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 5, 20, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="running",
+            pagesFetched=3,
+            storedCandles=120,
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+
+    response = client.post(
+        "/api/market/kline-backfill/retry",
+        headers=headers,
+        json={"symbol": "ETHUSDT", "period": "5M"},
+    )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "MARKET_KLINE_BACKFILL_TASK_NOT_RETRYABLE"
+
+
+def test_market_kline_backfill_retry_rejects_when_cleanup_is_running():
+    headers = auth_headers("kline-backfill-retry-cleanup@example.com")
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-BNBUSDT-1D",
+            symbol="BNBUSDT",
+            period="1D",
+            targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 5, 15, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="failed",
+            pagesFetched=2,
+            storedCandles=0,
+            lastError="network timeout",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+    store_module._market_kline_cleanup_state["cleaning"] = True
+
+    try:
+        response = client.post(
+            "/api/market/kline-backfill/retry",
+            headers=headers,
+            json={"symbol": "BNBUSDT", "period": "1D"},
+        )
+    finally:
+        store_module._market_kline_cleanup_state["cleaning"] = False
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "MARKET_KLINE_CLEANUP_RUNNING"
+
+
+def test_market_kline_backfill_busy_state_stays_true_until_all_executions_finish():
+    store_module._begin_market_kline_backfill_execution("BTCUSDT", "5M")
+    store_module._begin_market_kline_backfill_execution("ETHUSDT", "1D")
+
+    assert store_module._market_kline_backfill_is_backfilling() is True
+
+    store_module._finish_market_kline_backfill_execution()
+    assert store_module._market_kline_backfill_is_backfilling() is True
+
+    store_module._finish_market_kline_backfill_execution()
+    assert store_module._market_kline_backfill_is_backfilling() is False
+
+
+def test_market_kline_backfill_retry_rejects_when_failed_task_is_missing():
+    headers = auth_headers("kline-backfill-retry-missing@example.com")
+
+    response = client.post(
+        "/api/market/kline-backfill/retry",
+        headers=headers,
+        json={"symbol": "XRPUSDT", "period": "1H"},
+    )
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["code"] == "MARKET_KLINE_BACKFILL_TASK_NOT_FOUND"
+
+
+def test_market_kline_backfill_retry_returns_locked_response_shape(monkeypatch):
+    headers = auth_headers("kline-backfill-retry-success@example.com")
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    target_start = datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+    target_end = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    next_start = datetime(2026, 5, 15, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-SOLUSDT-5M",
+            symbol="SOLUSDT",
+            period="5M",
+            targetStart=target_start,
+            targetEnd=target_end,
+            nextStart=next_start,
+            status="failed",
+            pagesFetched=4,
+            storedCandles=180,
+            lastError="binance 429",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+    calls = []
+
+    def fake_advance(store_instance, task, max_pages):
+        calls.append((task.symbol, task.period, max_pages, task.pagesFetched, task.storedCandles))
+        return (
+            task.model_copy(
+                update={
+                    "status": "completed",
+                    "pagesFetched": task.pagesFetched + 1,
+                    "storedCandles": task.storedCandles + 60,
+                    "nextStart": task.targetEnd,
+                    "lastError": "",
+                    "updatedAt": datetime(2026, 6, 1, 12, 5, 0, tzinfo=timezone.utc).isoformat(),
+                }
+            ),
+            60,
+        )
+
+    monkeypatch.setattr(store_module, "_advance_market_kline_backfill_task", fake_advance)
+
+    response = client.post(
+        "/api/market/kline-backfill/retry",
+        headers=headers,
+        json={"symbol": "SOLUSDT", "period": "5M"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    for field in [
+        "symbol",
+        "period",
+        "status",
+        "statusLabel",
+        "storedCandles",
+        "pagesFetched",
+        "message",
+        "updatedAt",
+    ]:
+        assert field in body
+    assert body["symbol"] == "SOLUSDT"
+    assert body["period"] == "5M"
+    assert calls == [("SOLUSDT", "5M", 1, 4, 180)]
+    assert body["status"] == "completed"
+    assert body["statusLabel"]
+    assert body["storedCandles"] == 240
+    assert body["pagesFetched"] == 5
+    assert body["message"]
+    assert body["updatedAt"] == "2026-06-01T12:05:00+00:00"
+
+    retried_task = next(
+        task
+        for task in store.market_kline_backfill_tasks
+        if task.symbol == "SOLUSDT" and task.period == "5M"
+    )
+    assert retried_task.status == "completed"
+    assert retried_task.pagesFetched == 5
+    assert retried_task.storedCandles == 240
+    assert retried_task.lastError in {"", None}
+
+
+def test_market_kline_backfill_retry_rejects_when_task_is_already_claimed():
+    headers = auth_headers("kline-backfill-retry-claimed@example.com")
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-ADAUSDT-5M",
+            symbol="ADAUSDT",
+            period="5M",
+            targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 5, 15, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="failed",
+            pagesFetched=1,
+            storedCandles=20,
+            lastError="retry me",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+    claimed = store_module._claim_market_kline_backfill_task(store, "mkbf-ADAUSDT-5M", {"failed"})
+    assert claimed is not None
+
+    try:
+        response = client.post(
+            "/api/market/kline-backfill/retry",
+            headers=headers,
+            json={"symbol": "ADAUSDT", "period": "5M"},
+        )
+    finally:
+        store_module._release_market_kline_backfill_task_claim("mkbf-ADAUSDT-5M")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["code"] == "MARKET_KLINE_BACKFILL_TASK_NOT_RETRYABLE"
+
+
+def test_claim_market_kline_backfill_task_rolls_back_when_persist_running_fails(monkeypatch):
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-XLMUSDT-1D",
+            symbol="XLMUSDT",
+            period="1D",
+            targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 5, 20, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="failed",
+            pagesFetched=0,
+            storedCandles=0,
+            lastError="temporary",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+    original_upsert = store.upsert_market_kline_backfill_task
+
+    def failing_upsert(task):
+        if task.id == "mkbf-XLMUSDT-1D" and task.status == "running":
+            raise RuntimeError("persist running failed")
+        return original_upsert(task)
+
+    monkeypatch.setattr(store, "upsert_market_kline_backfill_task", failing_upsert)
+
+    with pytest.raises(RuntimeError, match="persist running failed"):
+        store_module._claim_market_kline_backfill_task(store, "mkbf-XLMUSDT-1D", {"failed"})
+
+    assert "mkbf-XLMUSDT-1D" not in set(store_module._market_kline_backfill_state.get("activeTaskIds") or set())
+    monkeypatch.setattr(store, "upsert_market_kline_backfill_task", original_upsert)
+    claimed_again = store_module._claim_market_kline_backfill_task(store, "mkbf-XLMUSDT-1D", {"failed"})
+    assert claimed_again is not None
+    store_module._release_market_kline_backfill_task_claim("mkbf-XLMUSDT-1D")
+
+
+def test_market_kline_backfill_retry_returns_error_envelope_and_releases_claim_on_advance_error(monkeypatch):
+    headers = auth_headers("kline-backfill-retry-error@example.com")
+    now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    store.upsert_market_kline_backfill_task(
+        MarketKlineBackfillTask(
+            id="mkbf-DOGEUSDT-5M",
+            symbol="DOGEUSDT",
+            period="5M",
+            targetStart=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            targetEnd=datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+            nextStart=datetime(2026, 5, 15, 0, 0, 0, tzinfo=timezone.utc).isoformat(),
+            status="failed",
+            pagesFetched=2,
+            storedCandles=50,
+            lastError="old error",
+            createdAt=now_iso,
+            updatedAt=now_iso,
+        )
+    )
+
+    def failing_advance(store_instance, task, max_pages):
+        raise RuntimeError("advance failed")
+
+    monkeypatch.setattr(store_module, "_advance_market_kline_backfill_task", failing_advance)
+
+    response = client.post(
+        "/api/market/kline-backfill/retry",
+        headers=headers,
+        json={"symbol": "DOGEUSDT", "period": "5M"},
+    )
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["code"] == "MARKET_KLINE_BACKFILL_RETRY_FAILED"
+    assert "advance failed" in body["message"]
+    assert "mkbf-DOGEUSDT-5M" not in set(store_module._market_kline_backfill_state.get("activeTaskIds") or set())
+    failed_task = next(task for task in store.market_kline_backfill_tasks if task.id == "mkbf-DOGEUSDT-5M")
+    assert failed_task.status == "failed"
+    assert failed_task.lastError == "advance failed"
+
+
 def test_market_kline_status_summarizes_collection_jobs():
     headers = auth_headers("kline-status@example.com")
     now_iso = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc).isoformat()
@@ -979,6 +1472,10 @@ def test_market_kline_status_summarizes_collection_jobs():
     assert five_minute["running"] == 1
     assert len(body["runningTasks"]) == 1
     assert body["runningTasks"][0]["symbol"] == "ETHUSDT"
+    assert len(body["failedTasks"]) == 1
+    assert body["failedTasks"][0]["symbol"] == "BNBUSDT"
+    assert body["failedTasks"][0]["period"] == "1H"
+    assert body["failedTasks"][0]["lastError"] == "network timeout"
     coverage = next(item for item in body["coverage"] if item["period"] == "5M")
     assert coverage["rows"] == 2
     assert coverage["symbols"] == 1
@@ -1199,48 +1696,451 @@ def test_market_klines_endpoint_returns_all_stored_candles_for_symbol_and_period
     assert len(body) == 12
 
 
-def test_market_radar_endpoint_scores_environment_and_recommends_symbols():
-    headers = auth_headers("market-radar@example.com")
-    base_time = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+def test_market_klines_endpoint_returns_latest_limited_candles_in_ascending_order():
+    headers = auth_headers("market-klines-limit@example.com")
+    eth_15m = market_candles(10.0, count=12, step_minutes=15)
+    store.upsert_market_candles("ETHUSDT", "15M", eth_15m)
+
+    response = client.get("/api/market/klines/ethusdt?period=15M&limit=5", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 5
+    assert [item["time"] for item in body] == [candle.time for candle in eth_15m[-5:]]
+    assert body[0]["close"] == eth_15m[-5].close
+
+
+def test_market_klines_endpoint_appends_live_partial_derived_candle_when_latest_closed_bucket_is_stale():
+    headers = auth_headers("market-klines-live-derived@example.com")
+    historical = market_candles(
+        1.0,
+        count=25,
+        start=datetime(2026, 6, 12, 18, 0, 0, tzinfo=timezone.utc),
+        step_minutes=5,
+    )
+    recent = market_candles(
+        2.0,
+        count=8,
+        start=datetime(2026, 6, 13, 11, 0, 0, tzinfo=timezone.utc),
+        step_minutes=5,
+    )
+    store.upsert_market_candles("LIVEPARTIALUSDT", "5M", [*historical, *recent])
+
+    stored_hourly = store.latest_market_candles("LIVEPARTIALUSDT", "1H", 5)
+    assert stored_hourly[-1].time == datetime(2026, 6, 12, 19, 0, 0, tzinfo=timezone.utc).isoformat()
+
+    response = client.get("/api/market/klines/livepartialusdt?period=1H&limit=5", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[-1]["time"] == datetime(2026, 6, 13, 11, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert body[-1]["open"] == recent[0].open
+    assert body[-1]["high"] == max(candle.high for candle in recent)
+    assert body[-1]["low"] == min(candle.low for candle in recent)
+    assert body[-1]["close"] == recent[-1].close
+    assert body[-1]["volume"] == sum(candle.volume for candle in recent)
+
+
+def test_market_radar_excludes_symbols_below_min_24h_quote_volume(monkeypatch):
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
     store.upsert_market_candles(
-        "BTCUSDT",
+        "STRONGUSDT",
         "1H",
-        trend_candles(100.0, 0.45, count=40, volume=1200, volume_step=12, start=base_time),
+        trend_candles(10.0, 0.32, count=90, volume=1200, volume_step=120, start=base_time),
     )
     store.upsert_market_candles(
-        "ETHUSDT",
+        "THINUSDT",
         "1H",
-        trend_candles(50.0, 0.25, count=40, volume=900, volume_step=9, start=base_time),
+        trend_candles(10.0, 0.32, count=90, volume=1200, volume_step=120, start=base_time),
     )
+
+    monkeypatch.setattr(
+        store,
+        "_fetch_market_radar_ticker_24h",
+        lambda: {
+            "STRONGUSDT": {"quoteVolume": 18_000_000},
+            "THINUSDT": {"quoteVolume": 8_000_000},
+        },
+        raising=False,
+    )
+
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    symbols = {
+        item.symbol
+        for section in snapshot.sections
+        for item in section.items
+    }
+    assert "STRONGUSDT" in symbols
+    assert "THINUSDT" not in symbols
+
+
+def test_market_radar_splits_results_into_three_explicit_sections(monkeypatch):
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
+    seed_market_radar_fixture(store, base_time)
+    monkeypatch.setattr(store, "_fetch_market_radar_ticker_24h", seeded_24h_tickers, raising=False)
+
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    keys = [section.key for section in snapshot.sections]
+    assert keys == ["short_start", "short_follow", "trend_72h"]
+    assert snapshot.opportunityGroups["short_start"] >= 1
+    assert snapshot.opportunityGroups["short_follow"] >= 1
+    assert snapshot.opportunityGroups["trend_72h"] >= 1
+    preview_item = next(item for section in snapshot.sections for item in section.items if item.previewCandles)
+    assert len(preview_item.previewCandles) <= 60
+    assert preview_item.previewCandles[0].time < preview_item.previewCandles[-1].time
+
+
+def test_market_radar_deduplicates_symbols_across_sections(monkeypatch):
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
+    seed_market_radar_fixture(store, base_time)
+    monkeypatch.setattr(store, "_fetch_market_radar_ticker_24h", seeded_24h_tickers, raising=False)
+
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    symbols = [
+        item.symbol
+        for section in snapshot.sections
+        for item in section.items
+    ]
+    assert len(symbols) == len(set(symbols))
+
+
+def test_market_radar_does_not_recommend_weak_chop_symbols(monkeypatch):
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
     store.upsert_market_candles(
-        "SOLUSDT",
+        "CHOPUSDT",
         "1H",
-        trend_candles(20.0, 0.35, count=40, volume=800, volume_step=80, start=base_time),
+        flat_then_wiggle_candles(5.0, count=90, start=base_time),
     )
+    monkeypatch.setattr(
+        store,
+        "_fetch_market_radar_ticker_24h",
+        lambda: {"CHOPUSDT": {"quoteVolume": 22_000_000}},
+        raising=False,
+    )
+
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    symbols = {
+        item.symbol
+        for section in snapshot.sections
+        for item in section.items
+    }
+    assert "CHOPUSDT" not in symbols
+
+
+def test_market_radar_does_not_recommend_weak_bounce_symbols_even_with_liquidity(monkeypatch):
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
     store.upsert_market_candles(
-        "LINKUSDT",
+        "CATIUSDT",
         "1H",
-        trend_candles(15.0, 0.12, count=40, volume=700, volume_step=12, start=base_time),
+        weak_bounce_candles(5.4, count=90, start=base_time),
     )
+    monkeypatch.setattr(
+        store,
+        "_fetch_market_radar_ticker_24h",
+        lambda: {"CATIUSDT": {"quoteVolume": 12_500_000, "volume": 1_250_000}},
+        raising=False,
+    )
+
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    symbols = {
+        item.symbol
+        for section in snapshot.sections
+        for item in section.items
+    }
+    assert "CATIUSDT" not in symbols
+
+
+def test_market_radar_prefers_breakout_trend_symbols(monkeypatch):
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
     store.upsert_market_candles(
-        "DOGEUSDT",
+        "NAORISUSDT",
         "1H",
-        trend_candles(8.0, -0.08, count=40, volume=650, volume_step=0, start=base_time),
+        breakout_trend_candles(3.2, count=90, start=base_time),
     )
+    monkeypatch.setattr(
+        store,
+        "_fetch_market_radar_ticker_24h",
+        lambda: {"NAORISUSDT": {"quoteVolume": 32_000_000, "volume": 3_200_000}},
+        raising=False,
+    )
+
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    selected = [
+        item
+        for section in snapshot.sections
+        for item in section.items
+        if item.symbol == "NAORISUSDT"
+    ]
+    assert selected
+    assert any(item.category in {"short_follow", "trend_72h"} for item in selected)
+
+
+def test_market_radar_endpoint_reads_cached_snapshot_sections(monkeypatch):
+    headers = auth_headers("market-radar-snapshot@example.com")
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
+    seed_market_radar_fixture(store, base_time)
+    monkeypatch.setattr(store, "_fetch_market_radar_ticker_24h", seeded_24h_tickers, raising=False)
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    def fail_compute(*args, **kwargs):
+        raise AssertionError("market radar endpoint should read persisted snapshot instead of recomputing")
+
+    monkeypatch.setattr(store_module, "_build_market_radar", fail_compute)
 
     response = client.get("/api/market/radar", headers=headers)
 
     assert response.status_code == 200
     body = response.json()
-    assert body["environment"]["score"] >= 60
-    assert body["environment"]["status"] in {"tradable", "watch_only"}
-    assert body["metrics"]["symbolsAnalyzed"] == 5
-    assert body["metrics"]["risingRatio"] > 50
-    assert body["recommendations"][0]["symbol"] == "SOLUSDT"
-    assert body["recommendations"][0]["score"] >= body["recommendations"][1]["score"]
-    assert body["recommendations"][0]["riskLevel"] in {"low", "medium", "high"}
-    assert body["opportunityGroups"]["breakout"] >= 1
-    assert body["updatedAt"]
+    assert body["updatedAt"] == snapshot.updatedAt
+    assert body["environment"]["score"] == snapshot.environment.score
+    assert body["sections"] == [section.model_dump(mode="json") for section in snapshot.sections]
+
+
+def test_market_radar_endpoint_returns_stale_snapshot_without_inline_refresh(monkeypatch):
+    headers = auth_headers("market-radar-stale@example.com")
+    stale_payload = {
+        "updatedAt": "2026-06-10T00:00:00+00:00",
+        "environment": {
+            "score": 10,
+            "status": "avoid",
+            "label": "stale",
+            "summary": "stale snapshot",
+            "notes": ["stale snapshot"],
+        },
+        "metrics": {
+            "symbolsAnalyzed": 1,
+            "risingRatio": 0,
+            "volumeExpansionRatio": 0,
+            "strongTrendRatio": 0,
+            "averageVolatility": 1.0,
+            "majorTrend": "stale",
+        },
+        "opportunityGroups": {"short_start": 1, "short_follow": 0, "trend_72h": 0},
+        "sections": [
+            {
+                "key": "short_start",
+                "title": "stale",
+                "description": "stale",
+                "items": [
+                    {
+                        "symbol": "CATIUSDT",
+                        "category": "short_start",
+                        "score": 55,
+                        "periodLabel": "1H",
+                        "previewCandles": [],
+                        "movePrimary": "3H +0.90%",
+                        "moveSecondary": "6H +1.90%",
+                        "quoteVolume24h": 12000000,
+                        "volumeRatio": 1.2,
+                        "pullbackFromHighPct": 1.1,
+                        "reason": "stale",
+                        "riskNote": "stale",
+                    }
+                ],
+            },
+            {"key": "short_follow", "title": "stale", "description": "stale", "items": []},
+            {"key": "trend_72h", "title": "stale", "description": "stale", "items": []},
+        ],
+    }
+    with store._connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            f"""
+            INSERT INTO `{store_module.MARKET_RADAR_SNAPSHOT_TABLE}` (period, payload, updated_at)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE payload = VALUES(payload), updated_at = VALUES(updated_at)
+            """,
+            ("1H", json.dumps(stale_payload, ensure_ascii=False), stale_payload["updatedAt"]),
+        )
+        connection.commit()
+
+    fresh_snapshot = store_module._empty_market_radar_response(datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)).model_copy(
+        update={"updatedAt": "2026-06-12T12:00:00+00:00"}
+    )
+
+    monkeypatch.setattr(store, "refresh_market_radar_snapshot", lambda period="1H", now=None: fresh_snapshot)
+
+    response = client.get("/api/market/radar", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["updatedAt"] == stale_payload["updatedAt"]
+    assert body["environment"]["label"] == "stale"
+
+
+def test_market_radar_endpoint_returns_empty_when_snapshot_missing(monkeypatch):
+    headers = auth_headers("market-radar-empty@example.com")
+
+    fresh_snapshot = store_module._empty_market_radar_response(datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)).model_copy(
+            update={
+                "updatedAt": "2026-06-12T12:00:00+00:00",
+                "environment": store_module.MarketRadarEnvironment(
+                    score=62,
+                    status="tradable",
+                    label="refreshed",
+                    summary="refreshed",
+                    notes=["refreshed"],
+                ),
+        }
+    )
+
+    monkeypatch.setattr(store, "refresh_market_radar_snapshot", lambda period="1H", now=None: fresh_snapshot)
+
+    response = client.get("/api/market/radar", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["environment"]["status"] == "avoid"
+    assert body["environment"]["label"] == "数据不足"
+    assert body["metrics"]["symbolsAnalyzed"] == 0
+    assert body["sections"] == []
+
+
+def test_market_radar_endpoint_reads_legacy_snapshot_payload():
+    headers = auth_headers("market-radar-legacy-snapshot@example.com")
+    recent_updated_at = datetime.now(timezone.utc).isoformat()
+    legacy_payload = {
+        "updatedAt": recent_updated_at,
+        "environment": {
+            "score": 58,
+            "status": "watch_only",
+            "label": "兼容旧快照",
+            "summary": "旧版快照结构应可兼容读取。",
+            "notes": ["旧 recommendations 需要在读取时转换为 sections。"],
+        },
+        "metrics": {
+            "symbolsAnalyzed": 1,
+            "risingRatio": 100,
+            "volumeExpansionRatio": 100,
+            "strongTrendRatio": 100,
+            "averageVolatility": 4.2,
+            "majorTrend": "主流币偏多",
+        },
+        "opportunityGroups": {"breakout": 1, "pullback": 0, "volume_start": 0, "watch": 0},
+        "recommendations": [
+            {
+                "symbol": "LEGACYUSDT",
+                "category": "breakout",
+                "score": 77,
+                "period": "1H",
+                "trend": "强",
+                "volume": "放量",
+                "riskLevel": "medium",
+                "changePct": 6.8,
+                "volumeRatio": 1.36,
+                "volatilityPct": 4.2,
+                "reason": "旧版推荐结构。",
+                "riskNote": "读取时需要保留可用内容。",
+            }
+        ],
+    }
+    with store._connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            f"""
+            INSERT INTO `{store_module.MARKET_RADAR_SNAPSHOT_TABLE}` (period, payload, updated_at)
+            VALUES (%s, %s, %s)
+            """,
+            ("1H", json.dumps(legacy_payload, ensure_ascii=False), legacy_payload["updatedAt"]),
+        )
+        connection.commit()
+
+    response = client.get("/api/market/radar", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["updatedAt"] == legacy_payload["updatedAt"]
+    assert body["sections"][0]["items"][0]["symbol"] == "LEGACYUSDT"
+
+
+def test_market_radar_endpoint_reads_legacy_snapshot_with_empty_recommendations():
+    headers = auth_headers("market-radar-legacy-empty@example.com")
+    recent_updated_at = datetime.now(timezone.utc).isoformat()
+    legacy_payload = {
+        "updatedAt": recent_updated_at,
+        "environment": {
+            "score": 31,
+            "status": "watch_only",
+            "label": "legacy empty",
+            "summary": "legacy payload with empty recommendations",
+            "notes": ["legacy payload should still be readable"],
+        },
+        "metrics": {
+            "symbolsAnalyzed": 0,
+            "risingRatio": 12,
+            "volumeExpansionRatio": 8,
+            "strongTrendRatio": 0,
+            "averageVolatility": 3.4,
+            "majorTrend": "mixed",
+        },
+        "opportunityGroups": {"breakout": 0, "pullback": 0, "volume_start": 0, "watch": 0},
+        "recommendations": [],
+    }
+    with store._connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            f"""
+            INSERT INTO `{store_module.MARKET_RADAR_SNAPSHOT_TABLE}` (period, payload, updated_at)
+            VALUES (%s, %s, %s)
+            """,
+            ("1H", json.dumps(legacy_payload, ensure_ascii=False), legacy_payload["updatedAt"]),
+        )
+        connection.commit()
+
+    response = client.get("/api/market/radar", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["updatedAt"] == legacy_payload["updatedAt"]
+    assert body["environment"]["summary"] == legacy_payload["environment"]["summary"]
+    assert [section["key"] for section in body["sections"]] == ["short_start", "short_follow", "trend_72h"]
+    assert all(section["items"] == [] for section in body["sections"])
+
+
+def test_market_radar_snapshot_scheduler_refreshes_latest_snapshot(monkeypatch):
+    refreshed: list[tuple[str, datetime | None]] = []
+
+    def fake_refresh(period: str, now: datetime | None = None):
+        refreshed.append((period, now))
+        return store_module._empty_market_radar_response(now)
+
+    monkeypatch.setattr(store, "refresh_market_radar_snapshot", fake_refresh)
+
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    result = store_module.run_market_radar_snapshot_scheduler_tick(store, now)
+
+    assert result == "1H"
+    assert refreshed == [("1H", now)]
+
+
+def test_market_radar_snapshot_refresh_failure_keeps_previous_snapshot(monkeypatch):
+    headers = auth_headers("market-radar-refresh-failure@example.com")
+    base_time = datetime(2026, 6, 12, 0, 0, 0, tzinfo=timezone.utc)
+    seed_market_radar_fixture(store, base_time)
+    monkeypatch.setattr(store, "_fetch_market_radar_ticker_24h", seeded_24h_tickers, raising=False)
+    snapshot = store.refresh_market_radar_snapshot("1H", base_time)
+
+    def fail_refresh(*args, **kwargs):
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(store, "refresh_market_radar_snapshot", fail_refresh)
+
+    result = store_module.run_market_radar_snapshot_scheduler_tick(
+        store,
+        datetime(2026, 6, 12, 1, 0, 0, tzinfo=timezone.utc),
+    )
+
+    response = client.get("/api/market/radar", headers=headers)
+
+    assert result is None
+    assert response.status_code == 200
+    assert response.json()["updatedAt"] == snapshot.updatedAt
 
 
 def test_run_strategy_uses_cached_market_candles_for_all_tradable_symbols(monkeypatch):
@@ -2380,6 +3280,47 @@ def test_watchlist_creation_requires_conditions():
         headers=auth_headers(),
     )
     assert response.status_code == 422
+
+
+def test_delete_watch_item_removes_only_watchlist_entry():
+    headers = auth_headers("delete-watch-item@example.com")
+    create_response = client.post(
+        "/api/watchlist",
+        json={
+            "symbol": "ALLUSDT",
+            "conditions": [
+                {
+                    "id": "delete-condition",
+                    "type": "price",
+                    "period": "1H",
+                    "expression": "price > 0.3000",
+                    "status": "pending",
+                    "lastTriggeredAt": None,
+                }
+            ],
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 200
+    watch_item_id = create_response.json()["id"]
+
+    delete_response = client.delete(f"/api/watchlist/{watch_item_id}", headers=headers)
+
+    assert delete_response.status_code == 204
+    list_response = client.get("/api/watchlist", headers=headers)
+    assert list_response.status_code == 200
+    assert watch_item_id not in {item["id"] for item in list_response.json()}
+
+
+def test_delete_missing_watch_item_uses_error_envelope():
+    response = client.delete("/api/watchlist/missing-watch", headers=auth_headers())
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "WATCH_ITEM_NOT_FOUND",
+        "message": "Watch item not found",
+        "details": {"watchItemId": "missing-watch"},
+    }
 
 
 def test_knowledge_case_detail():

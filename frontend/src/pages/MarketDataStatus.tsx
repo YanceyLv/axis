@@ -1,5 +1,6 @@
+import { useMemo, useState } from "react";
 import { AlertTriangle, Clock3, RefreshCw, ShieldCheck, ToggleLeft, ToggleRight } from "lucide-react";
-import type { MarketKlineStatusResponse, MarketKlineTaskCard, Period } from "../types";
+import type { MarketKlineFailedTask, MarketKlineStatusResponse, MarketKlineTaskCard, Period } from "../types";
 
 interface MarketDataStatusProps {
   status: MarketKlineStatusResponse | null;
@@ -7,6 +8,7 @@ interface MarketDataStatusProps {
   autoRefresh: boolean;
   onRefresh: () => Promise<void>;
   onToggleAutoRefresh: () => void;
+  onRetryFailedTask: (symbol: string, period: Period) => Promise<void>;
 }
 
 const statusClass: Record<MarketKlineTaskCard["status"], string> = {
@@ -17,20 +19,55 @@ const statusClass: Record<MarketKlineTaskCard["status"], string> = {
 };
 
 const nativePeriods = new Set<Period>(["5M", "1D"]);
+const periodOptions: Array<{ value: "ALL" | Period; label: string }> = [
+  { value: "ALL", label: "全部" },
+  { value: "5M", label: "5M 及以上" },
+  { value: "15M", label: "15M 及以上" },
+  { value: "1H", label: "1H 及以上" },
+  { value: "4H", label: "4H 及以上" },
+  { value: "1D", label: "1D" }
+];
+const periodOrder: Record<Period, number> = { "5M": 1, "15M": 2, "1H": 3, "4H": 4, "1D": 5 };
 
 export function MarketDataStatus({
   status,
   loading,
   autoRefresh,
   onRefresh,
-  onToggleAutoRefresh
+  onToggleAutoRefresh,
+  onRetryFailedTask
 }: MarketDataStatusProps) {
+  const [failedTaskMinPeriod, setFailedTaskMinPeriod] = useState<"ALL" | Period>("ALL");
+  const [retryingTaskKeys, setRetryingTaskKeys] = useState<string[]>([]);
+  const failedTasks = status?.failedTasks ?? [];
+  const showBackfillProgress = !status || status.runningTasks.length > 0 || status.periodProgress.some(
+    (item) => isNativePeriod(item.period) && (item.failed > 0 || item.running > 0 || item.pending > 0 || item.completed < item.total)
+  );
+  const showRunningTasks = status?.runningTasks.length ? status.runningTasks.length > 0 : false;
+
+  const filteredFailedTasks = useMemo(() => {
+    if (failedTaskMinPeriod === "ALL") return failedTasks;
+    const minOrder = periodOrder[failedTaskMinPeriod];
+    return failedTasks.filter((task) => periodOrder[task.period] >= minOrder);
+  }, [failedTaskMinPeriod, failedTasks]);
+  const showFailedTasks = filteredFailedTasks.length > 0;
+
+  async function handleRetry(task: MarketKlineFailedTask) {
+    const taskKey = failedTaskKey(task.symbol, task.period);
+    setRetryingTaskKeys((current) => (current.includes(taskKey) ? current : [...current, taskKey]));
+    try {
+      await onRetryFailedTask(task.symbol, task.period);
+    } finally {
+      setRetryingTaskKeys((current) => current.filter((item) => item !== taskKey));
+    }
+  }
+
   return (
     <section className="page market-data-page">
       <header className="page-header compact-header">
         <div>
           <h1>数据采集</h1>
-          <p>K线历史补齐、增量更新、数据清理的后台任务状态。</p>
+          <p>K 线历史补齐、增量更新与清理任务的后台状态。</p>
         </div>
         <div className="toolbar-actions">
           <span className="header-meta">最后刷新：{status ? formatTime(status.updatedAt) : "--"}</span>
@@ -46,7 +83,7 @@ export function MarketDataStatus({
       </header>
 
       {!status ? (
-        <div className="panel empty-state">{loading ? "正在加载数据采集状态..." : "暂无数据采集状态"}</div>
+        <div className="panel empty-state">{loading ? "正在加载数据采集状态..." : "暂无数据采集状态。"}</div>
       ) : (
         <>
           <section className="data-status-summary">
@@ -64,18 +101,18 @@ export function MarketDataStatus({
 
           <section className="panel table-panel data-coverage-panel">
             <div className="panel-title">
-              <h2>K线数据覆盖</h2>
-              <span className="muted">按周期统计数据库已存在数据</span>
+              <h2>K 线数据覆盖</h2>
+              <span className="muted">按周期统计数据库内已存在的数据。</span>
             </div>
             <div className="data-note-strip">
-              5M/1D 为原生采集；15M/1H/4H 由 5M 完整 K 线自动聚合缓存，不再单独请求 Binance。
+              5M / 1D 为原生采集；15M / 1H / 4H 由 5M 完整 K 线自动聚合缓存，不会单独请求 Binance。
             </div>
             <table className="table data-table">
               <thead>
                 <tr>
                   <th>周期</th>
                   <th>来源</th>
-                  <th>K线数量</th>
+                  <th>K 线数量</th>
                   <th>交易对</th>
                   <th>目标窗口</th>
                   <th>最早时间</th>
@@ -100,11 +137,12 @@ export function MarketDataStatus({
             </table>
           </section>
 
-          <section className="data-status-grid">
-            <div className="panel table-panel">
+          <section className={`data-status-grid${showBackfillProgress ? "" : " single-panel"}`}>
+            {showBackfillProgress ? (
+              <div className="panel table-panel">
               <div className="panel-title">
                 <h2>历史补齐进度</h2>
-                <span className="muted">仅 5M/1D 有原生补齐任务，派生周期随 5M 写入刷新</span>
+                <span className="muted">仅 5M / 1D 有原生补齐任务，派生周期随 5M 写入刷新。</span>
               </div>
               <table className="table data-table">
                 <thead>
@@ -146,12 +184,14 @@ export function MarketDataStatus({
                   })}
                 </tbody>
               </table>
-            </div>
+              </div>
+            ) : null}
 
-            <div className="panel table-panel">
+            {showRunningTasks ? (
+              <div className="panel table-panel">
               <div className="panel-title">
                 <h2>当前运行任务</h2>
-                <span className="muted">仅显示 5M/1D 原生补齐任务，最多 8 个</span>
+                <span className="muted">仅显示 5M / 1D 原生补齐任务，最多 8 个。</span>
               </div>
               {status.runningTasks.length === 0 ? (
                 <div className="compact-empty">当前没有正在执行的补齐子任务。</div>
@@ -179,14 +219,83 @@ export function MarketDataStatus({
                   </tbody>
                 </table>
               )}
-            </div>
+              </div>
+            ) : null}
           </section>
+
+          {showFailedTasks ? (
+            <section className="panel table-panel failed-task-panel">
+            <div className="panel-title">
+              <div className="failed-task-title">
+                <h2>失败任务</h2>
+                <span className="muted">重试会立即执行一轮，不会加入队列。</span>
+              </div>
+              <label className="failed-task-filter" htmlFor="failed-task-min-period">
+                <span>最小周期</span>
+                <select
+                  id="failed-task-min-period"
+                  value={failedTaskMinPeriod}
+                  onChange={(event) => setFailedTaskMinPeriod(event.target.value as "ALL" | Period)}
+                >
+                  {periodOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {filteredFailedTasks.length === 0 ? (
+              <div className="compact-empty">当前筛选条件下没有失败任务。</div>
+            ) : (
+              <table className="table data-table">
+                <thead>
+                  <tr>
+                    <th>交易对</th>
+                    <th>周期</th>
+                    <th>页数</th>
+                    <th>已写入</th>
+                    <th>下次起点</th>
+                    <th>目标结束</th>
+                    <th>最近错误</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredFailedTasks.map((task) => {
+                    const taskKey = failedTaskKey(task.symbol, task.period);
+                    const retrying = retryingTaskKeys.includes(taskKey);
+                    return (
+                      <tr key={taskKey}>
+                        <td><strong>{task.symbol}</strong></td>
+                        <td>{task.period}</td>
+                        <td>{task.pagesFetched}</td>
+                        <td>{formatNumber(task.storedCandles)}</td>
+                        <td>{formatTime(task.nextStart)}</td>
+                        <td>{formatTime(task.targetEnd)}</td>
+                        <td className="failed-task-error" title={task.lastError}>{task.lastError}</td>
+                        <td>
+                          <button
+                            className="secondary compact"
+                            type="button"
+                            onClick={() => void handleRetry(task).catch(() => undefined)}
+                            disabled={retrying}
+                          >
+                            {retrying ? "执行中..." : "立即重试"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+            </section>
+          ) : null}
 
           <section className="data-status-grid bottom-grid">
             <div className="panel table-panel">
               <div className="panel-title">
                 <h2>最近任务记录</h2>
-                <span className="muted">补齐、增量、清理</span>
+                <span className="muted">补齐、增量、清理。</span>
               </div>
               <table className="table data-table">
                 <thead>
@@ -227,7 +336,7 @@ export function MarketDataStatus({
                 ))}
                 <li>
                   <AlertTriangle size={15} aria-hidden="true" />
-                  <span>派生周期只在 5M 完整桶齐全后生成，未闭合的 15M/1H/4H 不会提前写入。</span>
+                  <span>派生周期只会在 5M 完整补齐后生成，未闭合的 15M / 1H / 4H 不会提前写入。</span>
                 </li>
               </ul>
             </aside>
@@ -269,6 +378,10 @@ function TaskCard({ card }: { card: MarketKlineTaskCard }) {
       {card.lastError ? <p className="task-error">{card.lastError}</p> : null}
     </article>
   );
+}
+
+function failedTaskKey(symbol: string, period: Period) {
+  return `${symbol}-${period}`;
 }
 
 function formatTime(value: string | null | undefined) {

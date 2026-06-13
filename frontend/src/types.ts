@@ -211,27 +211,36 @@ export interface MarketRadarMetrics {
   majorTrend: string;
 }
 
-export interface MarketRadarRecommendation {
+export type MarketRadarSectionKey = "short_start" | "short_follow" | "trend_72h";
+
+export interface MarketRadarSectionItem {
   symbol: string;
-  category: "breakout" | "pullback" | "volume_start" | "watch";
+  category: MarketRadarSectionKey;
   score: number;
-  period: Period;
-  trend: string;
-  volume: string;
-  riskLevel: "low" | "medium" | "high";
-  changePct: number;
+  periodLabel: string;
+  previewCandles: Candle[];
+  movePrimary: string;
+  moveSecondary: string;
+  quoteVolume24h: number;
   volumeRatio: number;
-  volatilityPct: number;
+  pullbackFromHighPct: number;
   reason: string;
   riskNote: string;
+}
+
+export interface MarketRadarSection {
+  key: MarketRadarSectionKey;
+  title: string;
+  description: string;
+  items: MarketRadarSectionItem[];
 }
 
 export interface MarketRadarResponse {
   updatedAt: string;
   environment: MarketRadarEnvironment;
   metrics: MarketRadarMetrics;
-  opportunityGroups: Record<MarketRadarRecommendation["category"], number>;
-  recommendations: MarketRadarRecommendation[];
+  opportunityGroups: Record<string, number>;
+  sections: MarketRadarSection[];
 }
 
 export interface MarketKlineTaskCard {
@@ -280,6 +289,28 @@ export interface MarketKlineRunningTask {
   lastError: string;
 }
 
+export interface MarketKlineFailedTask {
+  symbol: string;
+  period: Period;
+  pagesFetched: number;
+  storedCandles: number;
+  nextStart: string;
+  targetEnd: string;
+  updatedAt: string;
+  lastError: string;
+}
+
+export interface MarketKlineBackfillRetryResponse {
+  symbol: string;
+  period: Period;
+  status: "pending" | "running" | "completed";
+  statusLabel: string;
+  storedCandles: number;
+  pagesFetched: number;
+  message: string;
+  updatedAt: string;
+}
+
 export interface MarketKlineRecentTask {
   type: "backfill" | "incremental" | "cleanup";
   status: string;
@@ -298,6 +329,7 @@ export interface MarketKlineStatusResponse {
   periodProgress: MarketKlinePeriodProgress[];
   coverage: MarketKlineCoverage[];
   runningTasks: MarketKlineRunningTask[];
+  failedTasks: MarketKlineFailedTask[];
   recentTasks: MarketKlineRecentTask[];
   risks: string[];
 }

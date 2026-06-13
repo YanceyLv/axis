@@ -45,6 +45,13 @@ function readStoredAuth(): { user: AuthUser; token: string } | null {
   }
 }
 
+function normalizeMarketKlineStatus(status: MarketKlineStatusResponse): MarketKlineStatusResponse {
+  return {
+    ...status,
+    failedTasks: Array.isArray(status.failedTasks) ? status.failedTasks : [],
+  };
+}
+
 export default function App() {
   const [auth, setAuth] = useState<{ user: AuthUser; token: string } | null>(() => readStoredAuth());
   const [view, setView] = useState<ViewKey>("dashboard");
@@ -67,6 +74,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [addingSignalWatchId, setAddingSignalWatchId] = useState<string | null>(null);
+  const [deletingWatchId, setDeletingWatchId] = useState<string | null>(null);
   const addingSignalWatchIdsRef = useRef(new Set<string>());
 
   function handleAuthenticated(nextAuth: AuthResponse) {
@@ -285,7 +293,7 @@ export default function App() {
     return result;
   }
 
-  async function handleRefreshMarketRadar() {
+  const handleRefreshMarketRadar = useCallback(async () => {
     setMarketRadarLoading(true);
     setError(null);
     try {
@@ -295,19 +303,39 @@ export default function App() {
     } finally {
       setMarketRadarLoading(false);
     }
-  }
+  }, []);
 
   const handleRefreshMarketKlineStatus = useCallback(async () => {
     setMarketKlineStatusLoading(true);
     setError(null);
     try {
-      setMarketKlineStatus(await api.marketKlineStatus());
+      setMarketKlineStatus(normalizeMarketKlineStatus(await api.marketKlineStatus()));
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载数据采集状态失败");
     } finally {
       setMarketKlineStatusLoading(false);
     }
   }, []);
+
+  const handleRetryFailedMarketTask = useCallback(async (symbol: string, period: Period) => {
+    setError(null);
+    setBusyMessage(`正在立即执行一轮重试：${symbol} ${period}`);
+    try {
+      await api.marketKlineBackfillRetry(symbol, period);
+      setMarketKlineStatusLoading(true);
+      try {
+        setMarketKlineStatus(normalizeMarketKlineStatus(await api.marketKlineStatus()));
+      } catch {
+        setError("立即重试已执行，但状态刷新失败，请手动刷新后确认结果");
+      } finally {
+        setMarketKlineStatusLoading(false);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "立即重试失败");
+    } finally {
+      setBusyMessage(null);
+    }
+  }, [handleRefreshMarketKlineStatus]);
 
   async function handleLoadStrategyRunStatus() {
     return api.strategyRunStatus();
@@ -332,7 +360,15 @@ export default function App() {
   useEffect(() => {
     if (!auth || view !== "market-radar" || marketRadar || marketRadarLoading) return;
     void handleRefreshMarketRadar();
-  }, [auth, view, marketRadar, marketRadarLoading]);
+  }, [auth, view, marketRadar, marketRadarLoading, handleRefreshMarketRadar]);
+
+  useEffect(() => {
+    if (!auth || view !== "market-radar") return;
+    const timer = window.setInterval(() => {
+      void handleRefreshMarketRadar();
+    }, 180000);
+    return () => window.clearInterval(timer);
+  }, [auth, view, handleRefreshMarketRadar]);
 
   useEffect(() => {
     if (!auth || view !== "market-data" || marketKlineStatus || marketKlineStatusLoading) return;
@@ -357,6 +393,25 @@ export default function App() {
       setError(err instanceof Error ? err.message : "加入观察失败");
       throw err;
     } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function handleDeleteWatchItem(item: WatchItem) {
+    const confirmed = window.confirm(`确认删除观察项「${item.symbol}」？该操作不会删除历史信号或 K 线数据。`);
+    if (!confirmed) return;
+
+    setError(null);
+    setDeletingWatchId(item.id);
+    setBusyMessage("正在删除观察项...");
+    try {
+      await api.deleteWatchItem(item.id);
+      if (selectedWatchId === item.id) setSelectedWatchId("");
+      await refreshDashboardAndWatchlist();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除观察项失败");
+    } finally {
+      setDeletingWatchId(null);
       setBusyMessage(null);
     }
   }
@@ -443,6 +498,7 @@ export default function App() {
             loading={marketKlineStatusLoading}
             autoRefresh={marketKlineAutoRefresh}
             onRefresh={handleRefreshMarketKlineStatus}
+            onRetryFailedTask={handleRetryFailedMarketTask}
             onToggleAutoRefresh={() => setMarketKlineAutoRefresh((value) => !value)}
           />
         );
@@ -479,7 +535,15 @@ export default function App() {
           />
         );
       case "watchlist":
-        return <Watchlist watchlist={watchlist} onOpenWatch={openWatch} onCreateWatchItem={handleCreateWatchItem} />;
+        return (
+          <Watchlist
+            watchlist={watchlist}
+            deletingWatchId={deletingWatchId}
+            onOpenWatch={openWatch}
+            onCreateWatchItem={handleCreateWatchItem}
+            onDeleteWatch={handleDeleteWatchItem}
+          />
+        );
       case "watch-detail":
         return <WatchDetail item={selectedWatch} candles={selectedWatchCandles} onBack={() => setView("watchlist")} />;
       case "knowledge":

@@ -6,13 +6,21 @@ import type { CreateWatchItemPayload, Period, WatchCondition, WatchItem } from "
 
 interface WatchlistProps {
   watchlist: WatchItem[];
+  deletingWatchId?: string | null;
   onOpenWatch: (id: string) => void;
   onCreateWatchItem: (payload: CreateWatchItemPayload) => Promise<void>;
+  onDeleteWatch: (item: WatchItem) => Promise<void>;
 }
 
 const periods: Period[] = ["5M", "15M", "1H", "4H", "1D"];
 
-export function Watchlist({ watchlist, onOpenWatch, onCreateWatchItem }: WatchlistProps) {
+export function Watchlist({
+  watchlist,
+  deletingWatchId = null,
+  onOpenWatch,
+  onCreateWatchItem,
+  onDeleteWatch
+}: WatchlistProps) {
   const [modalOpen, setModalOpen] = useState(false);
 
   return (
@@ -51,10 +59,22 @@ export function Watchlist({ watchlist, onOpenWatch, onCreateWatchItem }: Watchli
                 <td>{formatDateTime(item.lastTriggeredAt)}</td>
                 <td>{formatDateTime(item.createdAt)}</td>
                 <td>
-                  <button className="secondary compact" onClick={() => onOpenWatch(item.id)} type="button">
-                    <Eye size={15} aria-hidden="true" />
-                    查看
-                  </button>
+                  <div className="table-actions">
+                    <button className="secondary compact" onClick={() => onOpenWatch(item.id)} type="button">
+                      <Eye size={15} aria-hidden="true" />
+                      查看
+                    </button>
+                    <button
+                      className="icon-button danger compact"
+                      disabled={deletingWatchId === item.id}
+                      onClick={() => void onDeleteWatch(item)}
+                      title="删除观察项"
+                      type="button"
+                      aria-label={`删除观察项 ${item.symbol}`}
+                    >
+                      <Trash2 size={15} aria-hidden="true" />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}

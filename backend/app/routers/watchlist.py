@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from app.errors import ApiError
 from app.models import CreateWatchItemRequest, WatchItem
@@ -30,3 +30,17 @@ def get_watch_item(watch_item_id: str) -> WatchItem:
 @router.post("", response_model=WatchItem)
 def create_watch_item(payload: CreateWatchItemRequest) -> WatchItem:
     return store.create_watch_item(payload)
+
+
+@router.delete("/{watch_item_id}", status_code=204)
+def delete_watch_item(watch_item_id: str) -> Response:
+    deleted = store.delete_watch_item(watch_item_id)
+    if deleted is None:
+        raise ApiError(
+            status_code=404,
+            code="WATCH_ITEM_NOT_FOUND",
+            message="Watch item not found",
+            details={"watchItemId": watch_item_id},
+        )
+
+    return Response(status_code=204)

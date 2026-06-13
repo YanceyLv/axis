@@ -59,6 +59,8 @@ export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }: 
     );
   }
 
+  const reviewAnalysis = signal.performance ? formatReviewAnalysis(signal.performance.reviewAnalysis) : "";
+
   return (
     <section className="page">
       <header className="page-header">
@@ -151,19 +153,36 @@ export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }: 
       </section>
 
       {signal.performance?.reviewStatus === "generated" ? (
-        <section className="panel">
+        <section className="panel ai-review-panel">
           <div className="panel-title">
             <h2>AI 复盘</h2>
             <span className="chip">{reviewResultLabel(signal.performance.reviewResult)}</span>
           </div>
-          <p>{signal.performance.reviewSummary}</p>
-          <p className="muted">{signal.performance.reviewAnalysis}</p>
+          <div className="ai-review-metrics">
+            <ReviewMetric label="1H 表现" value={formatPercent(signal.performance.change1hPct)} />
+            <ReviewMetric label="4H 表现" value={formatPercent(signal.performance.change4hPct)} />
+            <ReviewMetric label="24H 表现" value={formatPercent(signal.performance.change24hPct)} />
+            <ReviewMetric label="最大回撤" value={formatPercent(signal.performance.maxDrawdownPct)} />
+          </div>
+          <article className="ai-review-summary">
+            <span>主结论</span>
+            <p>{signal.performance.reviewSummary}</p>
+          </article>
+          {reviewAnalysis ? (
+            <article className="ai-review-analysis">
+              <span>复盘判断</span>
+              <p>{reviewAnalysis}</p>
+            </article>
+          ) : null}
           {signal.performance.reviewSuggestions.length ? (
-            <ul className="analysis-list">
+            <div className="ai-review-suggestions">
+              <span>操作建议</span>
+              <ol>
               {signal.performance.reviewSuggestions.map((item) => (
                 <li key={item}>{item}</li>
               ))}
-            </ul>
+              </ol>
+            </div>
           ) : null}
         </section>
       ) : null}
@@ -187,6 +206,16 @@ export function SignalDetail({ signal, isAddingToWatch, onBack, onAddToWatch }: 
 
 const periods: Period[] = ["5M", "15M", "1H", "4H", "1D"];
 
+function ReviewMetric({ label, value }: { label: string; value: string }) {
+  const directionClass = value.startsWith("+") ? "positive" : value.startsWith("-") ? "negative" : "";
+  return (
+    <div className="ai-review-metric">
+      <span>{label}</span>
+      <strong className={directionClass}>{value}</strong>
+    </div>
+  );
+}
+
 function performanceStatusLabel(status: NonNullable<Signal["performance"]>["status"]): string {
   if (status === "completed") return "追踪完成";
   if (status === "insufficient_data") return "数据不足";
@@ -199,6 +228,28 @@ function reviewResultLabel(result: NonNullable<Signal["performance"]>["reviewRes
   if (result === "failed") return "失败";
   if (result === "insufficient_data") return "数据不足";
   return "待复盘";
+}
+
+function formatReviewAnalysis(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (!isRawReviewPayload(trimmed)) return trimmed;
+  return extractReviewField(trimmed, "interpretation") ?? extractReviewField(trimmed, "summary") ?? "";
+}
+
+function isRawReviewPayload(value: string): boolean {
+  return value.startsWith("{") && (
+    value.includes("signalId") ||
+    value.includes("performance") ||
+    value.includes("interpretation") ||
+    value.includes("historicalEvidence")
+  );
+}
+
+function extractReviewField(value: string, field: string): string | null {
+  const pattern = new RegExp(`[\"']${field}[\"']\\s*:\\s*[\"']([\\s\\S]*?)[\"']\\s*(?:,|})`);
+  const match = value.match(pattern);
+  return match?.[1]?.trim() || null;
 }
 
 function formatPercent(value: number | null): string {

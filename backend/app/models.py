@@ -383,6 +383,22 @@ class MarketKlineBackfillTask(BaseModel):
     updatedAt: str
 
 
+class MarketKlineBackfillRetryRequest(BaseModel):
+    symbol: str
+    period: Period
+
+
+class MarketKlineBackfillRetryResponse(BaseModel):
+    symbol: str
+    period: Period
+    status: Literal["pending", "running", "completed"]
+    statusLabel: str
+    storedCandles: int
+    pagesFetched: int
+    message: str
+    updatedAt: str
+
+
 class MarketKlineTaskCard(BaseModel):
     name: str
     status: Literal["running", "waiting", "completed", "warning"]
@@ -429,6 +445,17 @@ class MarketKlineRunningTask(BaseModel):
     lastError: str = ""
 
 
+class MarketKlineFailedTask(BaseModel):
+    symbol: str
+    period: Period
+    pagesFetched: int
+    storedCandles: int
+    nextStart: str
+    targetEnd: str
+    updatedAt: str
+    lastError: str
+
+
 class MarketKlineRecentTask(BaseModel):
     type: Literal["backfill", "incremental", "cleanup"]
     status: str
@@ -447,6 +474,7 @@ class MarketKlineStatusResponse(BaseModel):
     periodProgress: list[MarketKlinePeriodProgress]
     coverage: list[MarketKlineCoverage]
     runningTasks: list[MarketKlineRunningTask]
+    failedTasks: list[MarketKlineFailedTask]
     recentTasks: list[MarketKlineRecentTask]
     risks: list[str]
 
@@ -468,19 +496,26 @@ class MarketRadarMetrics(BaseModel):
     majorTrend: str
 
 
-class MarketRadarRecommendation(BaseModel):
+class MarketRadarSectionItem(BaseModel):
     symbol: str
-    category: Literal["breakout", "pullback", "volume_start", "watch"]
+    category: Literal["short_start", "short_follow", "trend_72h"]
     score: int
-    period: Period
-    trend: str
-    volume: str
-    riskLevel: Literal["low", "medium", "high"]
-    changePct: float
+    periodLabel: str
+    previewCandles: list[Candle] = Field(default_factory=list)
+    movePrimary: str
+    moveSecondary: str
+    quoteVolume24h: float
     volumeRatio: float
-    volatilityPct: float
+    pullbackFromHighPct: float
     reason: str
     riskNote: str
+
+
+class MarketRadarSection(BaseModel):
+    key: Literal["short_start", "short_follow", "trend_72h"]
+    title: str
+    description: str
+    items: list[MarketRadarSectionItem] = Field(default_factory=list)
 
 
 class MarketRadarResponse(BaseModel):
@@ -488,7 +523,7 @@ class MarketRadarResponse(BaseModel):
     environment: MarketRadarEnvironment
     metrics: MarketRadarMetrics
     opportunityGroups: dict[str, int]
-    recommendations: list[MarketRadarRecommendation]
+    sections: list[MarketRadarSection] = Field(default_factory=list)
 
 
 class WatchCondition(BaseModel):
